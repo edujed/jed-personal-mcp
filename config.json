@@ -1,0 +1,19 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3050,
+    "user": "SYSDBA",
+    "password": "masterkey",
+    "allowed_paths": [
+      "/home/edujed/databases"
+    ],
+    "databases": [
+      {
+        "name": "dev",
+        "description": "Local development database",
+        "path": "/home/edujed/databases/dev.fdb"
+      }
+    ],
+    "default_database": "dev"
+  }
+}
