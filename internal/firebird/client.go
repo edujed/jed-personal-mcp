@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/edujed/jed-personal-mcp/internal/config"
 	_ "github.com/nakagami/firebirdsql"
@@ -38,9 +39,15 @@ func (c *Client) Close() error {
 	return c.db.Close()
 }
 
+// ColumnMeta holds the name and type information for a result column.
+type ColumnMeta struct {
+	Name string
+	Type string
+}
+
 // QueryResult represents a single row as a map of column names to values.
 type QueryResult struct {
-	Columns []string
+	Columns []ColumnMeta
 	Rows    []map[string]any
 }
 
@@ -57,7 +64,7 @@ func (c *Client) Query(ctx context.Context, query string, args ...any) (*QueryRe
 		return nil, fmt.Errorf("failed to get columns: %w", err)
 	}
 
-	result := &QueryResult{Columns: columns}
+	result := &QueryResult{Columns: make([]ColumnMeta, 0, len(columns))}
 
 	for rows.Next() {
 		scanArgs := make([]any, len(columns))
@@ -68,6 +75,16 @@ func (c *Client) Query(ctx context.Context, query string, args ...any) (*QueryRe
 
 		if err := rows.Scan(scanArgs...); err != nil {
 			continue
+		}
+
+		if len(result.Columns) == 0 {
+			// Populate column metadata from the first row's types.
+			for i, col := range columns {
+				result.Columns = append(result.Columns, ColumnMeta{
+					Name: col,
+					Type: describeValue(values[i]),
+				})
+			}
 		}
 
 		row := make(map[string]any, len(columns))
@@ -81,7 +98,72 @@ func (c *Client) Query(ctx context.Context, query string, args ...any) (*QueryRe
 		result.Rows = append(result.Rows, row)
 	}
 
+	if len(result.Columns) == 0 {
+		// No rows returned: fall back to the driver's column type info.
+		cts, _ := rows.ColumnTypes()
+		for i, col := range columns {
+			if i < len(cts) {
+				result.Columns = append(result.Columns, ColumnMeta{
+					Name: col,
+					Type: cts[i].DatabaseTypeName(),
+				})
+			} else {
+				result.Columns = append(result.Columns, ColumnMeta{Name: col})
+			}
+		}
+	}
+
 	return result, nil
+}
+
+// describeValue returns a human-readable type description for a scanned value,
+// e.g. "VARCHAR(50)", "INT", "DECIMAL(18,2)", "TIMESTAMP", "BLOB".
+func describeValue(v any) string {
+	switch val := v.(type) {
+	case nil:
+		return "UNKNOWN"
+	case string:
+		return "VARCHAR"
+	case []byte:
+		return "BLOB"
+	case int64:
+		return "INT"
+	case int32:
+		return "INT"
+	case int16:
+		return "INT"
+	case int8:
+		return "INT"
+	case int:
+		return "INT"
+	case uint64:
+		return "INT"
+	case uint32:
+		return "INT"
+	case uint16:
+		return "INT"
+	case uint8:
+		return "INT"
+	case uint:
+		return "INT"
+	case float64:
+		return "DOUBLE"
+	case float32:
+		return "FLOAT"
+	case bool:
+		return "BOOLEAN"
+	case time.Time:
+		switch {
+		case val.Hour() == 0 && val.Minute() == 0 && val.Second() == 0 && val.Nanosecond() == 0:
+			return "DATE"
+		case val.Year() == 0:
+			return "TIME"
+		default:
+			return "TIMESTAMP"
+		}
+	default:
+		return fmt.Sprintf("%T", val)
+	}
 }
 
 // Exec executes a statement that doesn't return rows (INSERT, UPDATE, DDL, etc.).
@@ -138,6 +220,102 @@ func (c *Client) RunScript(ctx context.Context, script string) (int, error) {
 		return executed, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return executed, nil
+}
+
+// InsertBatch inserts multiple rows into a table using a prepared statement
+// within a single transaction. Returns the number of rows inserted.
+func (c *Client) InsertBatch(ctx context.Context, table string, columns []string, rows [][]any) (int, error) {
+	if len(columns) == 0 {
+		return 0, fmt.Errorf("no columns specified")
+	}
+	if len(rows) == 0 {
+		return 0, fmt.Errorf("no rows to insert")
+	}
+
+	// Build the INSERT statement with placeholders
+	colList := make([]string, len(columns))
+	for i, col := range columns {
+		colList[i] = `"` + col + `"`
+	}
+	placeholders := make([]string, len(columns))
+	for i := range columns {
+		placeholders[i] = "?"
+	}
+	insertSQL := fmt.Sprintf("INSERT INTO \"%s\" (%s) VALUES (%s)",
+		table, strings.Join(colList, ", "), strings.Join(placeholders, ", "))
+
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
+	stmt, err := tx.PrepareContext(ctx, insertSQL)
+	if err != nil {
+		tx.Rollback()
+		return 0, fmt.Errorf("failed to prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	inserted := 0
+	for i, row := range rows {
+		if len(row) != len(columns) {
+			tx.Rollback()
+			return inserted, fmt.Errorf("row %d has %d values, expected %d", i+1, len(row), len(columns))
+		}
+		if _, err := stmt.ExecContext(ctx, row...); err != nil {
+			tx.Rollback()
+			return inserted, fmt.Errorf("row %d failed: %w", i+1, err)
+		}
+		inserted++
+	}
+
+	if err := tx.Commit(); err != nil {
+		return inserted, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return inserted, nil
+}
+
+// Count returns the number of rows matching the optional WHERE clause.
+func (c *Client) Count(ctx context.Context, table, where string) (int64, error) {
+	query := fmt.Sprintf("SELECT COUNT(*) FROM \"%s\"", table)
+	if where != "" {
+		query += " WHERE " + where
+	}
+	result, err := c.Query(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	if len(result.Rows) == 0 {
+		return 0, nil
+	}
+	// The column name is typically "COUNT" or "COUNT(*)"
+	for _, v := range result.Rows[0] {
+		if n := ToInt64(v); n >= 0 {
+			return n, nil
+		}
+	}
+	return 0, nil
+}
+
+// Sample returns up to limit rows from a table with an optional WHERE clause.
+func (c *Client) Sample(ctx context.Context, table, where string, limit int) (*QueryResult, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	query := fmt.Sprintf("SELECT * FROM \"%s\"", table)
+	if where != "" {
+		query += " WHERE " + where
+	}
+	query += fmt.Sprintf(" LIMIT %d", limit)
+	return c.Query(ctx, query)
+}
+
+// ExecuteImmediate executes a statement that may contain SET TERM blocks
+// (e.g. CREATE PROCEDURE, CREATE GENERATOR). This is similar to Exec but
+// explicitly handles the Firebird block delimiter.
+func (c *Client) ExecuteImmediate(ctx context.Context, sql string) error {
+	_, err := c.Exec(ctx, sql)
+	return err
 }
 
 // splitStatements splits a SQL script into individual statements.
@@ -276,6 +454,83 @@ type ColumnInfo struct {
 	Nullable  any    `json:"nullable"`
 	Default   any    `json:"default"`
 	Position  any    `json:"position"`
+}
+
+// firebirdTypeNames maps RDB$FIELD_TYPE numbers to Firebird type names.
+var firebirdTypeNames = map[int64]string{
+	7:  "SMALLINT",
+	8:  "INTEGER",
+	9:  "DATE",
+	10: "TIME",
+	11: "FLOAT",
+	12: "CHAR",
+	14: "DOUBLE",
+	20: "VARCHAR",
+	23: "TIMESTAMP",
+	27: "INT64",
+	35: "INT128",
+	37: "INT256",
+	40: "DECIMAL",
+	43: "NUMERIC",
+	45: "BLOB",
+	48: "NVARCHAR",
+	49: "BOOLEAN",
+}
+
+// FormatColumnType returns a human-readable type description for a column.
+func FormatColumnType(col ColumnInfo) string {
+	typeNum := ToInt64(col.TypeNum)
+	if typeNum == 0 {
+		return "UNKNOWN"
+	}
+	typeName, ok := firebirdTypeNames[typeNum]
+	if !ok {
+		return fmt.Sprintf("TYPE_%d", typeNum)
+	}
+
+	// Add size/precision info where relevant
+	switch typeName {
+	case "CHAR", "VARCHAR", "NVARCHAR":
+		if size := ToInt64(col.Size); size > 0 {
+			return fmt.Sprintf("%s(%d)", typeName, size)
+		}
+	case "DECIMAL", "NUMERIC":
+		if prec := ToInt64(col.Precision); prec > 0 {
+			if scale := ToInt64(col.Scale); scale > 0 {
+				return fmt.Sprintf("%s(%d,%d)", typeName, prec, scale)
+			}
+			return fmt.Sprintf("%s(%d)", typeName, prec)
+		}
+	}
+	return typeName
+}
+
+// ToInt64 safely converts an any value to int64, returning 0 if conversion fails.
+func ToInt64(v any) int64 {
+	switch val := v.(type) {
+	case int64:
+		return val
+	case int:
+		return int64(val)
+	case int32:
+		return int64(val)
+	case int16:
+		return int64(val)
+	case int8:
+		return int64(val)
+	case uint64:
+		return int64(val)
+	case uint32:
+		return int64(val)
+	case uint16:
+		return int64(val)
+	case uint8:
+		return int64(val)
+	case uint:
+		return int64(val)
+	default:
+		return 0
+	}
 }
 
 // IndexInfo represents an index on a table.

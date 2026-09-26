@@ -10,11 +10,17 @@ Is suitable for use with the [Zed Editor](https://zed.dev) in development tasks.
 
 ## Features
 
-- **`firebird_query`** — Execute SQL commands (SELECT, INSERT, UPDATE, CREATE TABLE, CREATE TRIGGER, etc.)
+- **`firebird_query`** — Execute a single SQL statement (SELECT, INSERT, UPDATE, CREATE TABLE, etc.)
 - **`firebird_show_tables`** — List all tables and views in the database
-- **`firebird_describe_table`** — Show the full schema of a table or view (columns, indexes, constraints, triggers, generators)
+- **`firebird_describe_table`** — Show the full schema of a table or view (columns, indexes, constraints, triggers)
 - **`firebird_get_databases`** — List all configured databases
 - **`firebird_create_database`** — Create a new Firebird database file (restricted to allowed paths)
+- **`firebird_run_script`** — Execute multiple SQL statements in a single transaction
+- **`firebird_create_trigger`** — Create a new trigger (handles SET TERM automatically)
+- **`firebird_insert_batch`** — Insert multiple rows in a single transaction (prepared statement)
+- **`firebird_count`** — Count rows in a table (with optional WHERE)
+- **`firebird_sample`** — Get a sample of rows from a table (with optional WHERE and LIMIT)
+- **`firebird_execute_immediate`** — Execute statements with SET TERM blocks (procedures, generators)
 
 ## Prerequisites
 
@@ -52,7 +58,7 @@ Edit `config.json`:
 ### 2. Build
 
 ```bash
-# Build for current platform
+# Build for current platform (development)
 ./scripts/build.sh
 
 # Build for a specific platform
@@ -63,7 +69,6 @@ Edit `config.json`:
 # Build for all platforms
 ./scripts/build.sh all
 ```
-
 Binaries are output to `bin/`.
 
 ### 3. Register in Zed Editor
@@ -131,6 +136,8 @@ The server looks for the config file in the following order:
 
 ## Tools
 
+All tools return results in **Markdown format** for better readability and token efficiency.
+
 ### `firebird_query`
 
 Executes a raw SQL statement against the database.
@@ -140,6 +147,20 @@ Executes a raw SQL statement against the database.
 | `sql` | `string` | Yes | The SQL statement to execute |
 | `database` | `string` | No | Database name (defaults to `default_database`) |
 
+**Example output:**
+
+```markdown
+### Query Results (3 rows)
+
+Columns: ID (INT), NAME (VARCHAR), CITY (VARCHAR)
+
+ID | NAME | CITY
+--- | --- | ---
+1 | Alice | São Paulo
+2 | Bob | NULL
+3 | Charlie | Rio de Janeiro
+```
+
 ### `firebird_show_tables`
 
 Lists all user tables and views.
@@ -147,6 +168,20 @@ Lists all user tables and views.
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `database` | `string` | No | Database name (defaults to `default_database`) |
+
+**Example output:**
+
+```markdown
+### Tables and Views (5)
+
+NAME | TYPE | COMMENT
+--- | --- | ---
+CLIENTS | TABLE | Customer records
+ORDERS | TABLE | Order data
+PRODUCTS | TABLE | Product catalog
+ORDERS_VIEW | VIEW | Orders with client info
+STATS | TABLE | -
+```
 
 ### `firebird_describe_table`
 
@@ -157,11 +192,56 @@ Shows the full schema of a table or view, including columns, indexes, constraint
 | `table_name` | `string` | Yes | Table or view name |
 | `database` | `string` | No | Database name (defaults to `default_database`) |
 
+**Example output:**
+
+```markdown
+### Table: CLIENTS
+
+#### Columns
+
+NAME | TYPE | NULL | DEFAULT | POSITION
+--- | --- | --- | --- | ---
+ID | INT | NO | - | 1
+NAME | VARCHAR(100) | NO | - | 2
+EMAIL | VARCHAR(255) | YES | - | 3
+CREATED_AT | TIMESTAMP | NO | - | 4
+
+#### Indexes
+
+NAME | UNIQUE | TYPE | COLUMNS
+--- | --- | --- | ---
+IDX_CLIENTS_ID | YES | 0 | ID
+IDX_CLIENTS_EMAIL | NO | 0 | EMAIL
+
+#### Constraints
+
+NAME | TYPE
+--- | ---
+PK_CLIENTS | PRIMARY KEY
+
+#### Triggers
+
+NAME | TYPE | SEQUENCE
+--- | --- | ---
+TRG_CLIENTS_AUDIT | 1 | 0
+```
+
 ### `firebird_get_databases`
 
 Lists all databases defined in `config.json`.
 
 No arguments required.
+
+**Example output:**
+
+```markdown
+### Configured Databases (2)
+
+NAME | DESCRIPTION | PATH | DEFAULT
+--- | --- | --- | ---
+dev | Local development database | /databases/dev.fdb | YES
+prod | Production database (read-only) | /databases/prod.fdb | NO
+```
 
 ### `firebird_create_database`
 
@@ -195,6 +275,79 @@ Creates a new trigger in the database. Handles the `SET TERM` delimiter automati
 | `trigger_type` | `string` | Yes | Trigger event: `INSERT`, `UPDATE`, or `DELETE` |
 | `timing` | `string` | Yes | Trigger timing: `BEFORE` or `AFTER` |
 | `body` | `string` | Yes | The trigger body (SQL statements, without `SET TERM` or `BEGIN/END`) |
+
+### `firebird_insert_batch`
+
+Inserts multiple rows into a table in a single transaction using a prepared statement. More efficient than multiple `firebird_query` calls for individual INSERTs.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `database` | `string` | No | Database name (defaults to `default_database`) |
+| `table` | `string` | Yes | Table name to insert into |
+| `columns` | `string` | Yes | Column names as a JSON array, e.g. `["NAME", "EMAIL"]` |
+| `rows` | `string` | Yes | Row data as a JSON array of arrays, e.g. `[["Alice", "a@x.com"], ["Bob", "b@x.com"]]` |
+
+**Example output:**
+
+```
+Inserted 2 rows into CLIENTS.
+```
+
+### `firebird_count`
+
+Returns the number of rows in a table, optionally filtered by a WHERE clause.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `database` | `string` | No | Database name (defaults to `default_database`) |
+| `table` | `string` | Yes | Table name to count rows from |
+| `where` | `string` | No | Optional WHERE clause (without the WHERE keyword) |
+
+**Example output:**
+
+```
+Count: 42 rows in CLIENTS (WHERE STATUS = 'ACTIVE')
+```
+
+### `firebird_sample`
+
+Returns a sample of rows from a table (default: 10 rows), optionally filtered by a WHERE clause.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `database` | `string` | No | Database name (defaults to `default_database`) |
+| `table` | `string` | Yes | Table name to sample from |
+| `where` | `string` | No | Optional WHERE clause (without the WHERE keyword) |
+| `limit` | `string` | No | Maximum number of rows to return (default: 10) |
+
+**Example output:**
+
+```markdown
+### Query Results (10 rows)
+
+Columns: ID (INT), NAME (VARCHAR), STATUS (VARCHAR)
+
+ID | NAME | STATUS
+--- | --- | ---
+1 | Alice | ACTIVE
+2 | Bob | INACTIVE
+3 | Charlie | ACTIVE
+```
+
+### `firebird_execute_immediate`
+
+Executes a SQL statement that may contain SET TERM blocks (e.g. CREATE PROCEDURE, CREATE GENERATOR, CREATE FUNCTION). For regular DML/DDL, use `firebird_query` instead.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `database` | `string` | No | Database name (defaults to `default_database`) |
+| `sql` | `string` | Yes | The SQL statement to execute (may include SET TERM blocks) |
+
+**Example output:**
+
+```
+Statement executed successfully.
+```
 
 ## Project Structure
 
