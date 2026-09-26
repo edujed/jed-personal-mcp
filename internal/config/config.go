@@ -2,9 +2,11 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -24,6 +26,7 @@ type ServerConfig struct {
 	AllowedPaths    []string         `json:"allowed_paths"`
 	Databases       []DatabaseConfig `json:"databases"`
 	DefaultDatabase string           `json:"default_database"`
+	ISQLPath        string           `json:"isql_path,omitempty"`
 }
 
 // Config is the root structure of config.json.
@@ -115,4 +118,72 @@ func (s *ServerConfig) IsPathAllowed(path string) bool {
 		}
 	}
 	return false
+}
+
+// FindISQL locates the isql (or fbisql) executable.
+// It first checks the configured ISQLPath, then searches common locations and PATH.
+func (s *ServerConfig) FindISQL() (string, error) {
+	// 1. Use configured path if set
+	if s.ISQLPath != "" {
+		if _, err := os.Stat(s.ISQLPath); err == nil {
+			return s.ISQLPath, nil
+		}
+		return "", fmt.Errorf("configured isql_path '%s' not found", s.ISQLPath)
+	}
+
+	// 2. Search common locations
+	candidates := []string{
+		"isql", "fbisql", "isql64", "fbisql64",
+		"/usr/bin/isql", "/usr/bin/fbisql",
+		"/usr/local/bin/isql", "/usr/local/bin/fbisql",
+		"/opt/firebird/bin/isql", "/opt/firebird/bin/fbisql",
+		"/opt/firebird64/bin/isql", "/opt/firebird64/bin/fbisql",
+	}
+
+	for _, c := range candidates {
+		if strings.Contains(c, "/") {
+			// Absolute path: check if it exists
+			if _, err := os.Stat(c); err == nil {
+				return c, nil
+			}
+		} else {
+			// Search PATH
+			if path, err := exec.LookPath(c); err == nil {
+				return path, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("isql not found. Set 'isql_path' in config.json or ensure isql/fbisql is in PATH")
+}
+
+// ExecuteWithISQL executes SQL via the isql command-line tool.
+// This is used for statements that require SET TERM blocks (procedures, generators, triggers).
+func (s *ServerConfig) ExecuteWithISQL(ctx context.Context, dbPath, sql string) (string, error) {
+	// Find isql
+	isqlPath, err := s.FindISQL()
+	if err != nil {
+		return "", err
+	}
+
+	// Build isql command
+	cmd := exec.CommandContext(ctx, isqlPath,
+		"-user", s.User,
+		"-password", s.Password,
+		"-database", s.DSN(dbPath),
+	)
+
+	// Pass SQL via stdin
+	cmd.Stdin = strings.NewReader(sql)
+
+	// Capture output
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("isql execution failed: %w\nstderr: %s", err, stderr.String())
+	}
+
+	return stdout.String(), nil
 }

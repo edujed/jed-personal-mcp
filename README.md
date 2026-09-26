@@ -50,10 +50,13 @@ Edit `config.json`:
         "path": "/databases/dev.fdb"
       }
     ],
-    "default_database": "dev"
+    "default_database": "dev",
+    "isql_path": "/usr/bin/isql"
   }
 }
 ```
+
+**Note:** The `isql_path` field is optional. If not set, the server will automatically search for `isql` or `fbisql` in common locations and PATH. This is required for tools that use SET TERM blocks (`firebird_create_trigger`, `firebird_execute_immediate`).
 
 ### 2. Build
 

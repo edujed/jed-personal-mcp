@@ -192,13 +192,15 @@ Example: "CREATE TABLE T (ID INT); INSERT INTO T VALUES (1); CREATE INDEX IDX_T 
 	s.AddTool(
 		mcp.NewTool(
 			"firebird_create_trigger",
-			mcp.WithDescription(`Creates a new trigger in the database. The SET TERM delimiter is handled automatically.
+			mcp.WithDescription(`Creates a new trigger in the database.
 
-Returns: a success message with the trigger name and table.
+		Uses the isql command-line tool to handle SET TERM blocks.
 
-Example: creates a BEFORE INSERT trigger on table ORDERS.
+		Returns: a success message with the trigger name and table (or an error).
 
-Note: The body should contain only the SQL statements (without BEGIN/END or SET TERM).`),
+		Example: creates a BEFORE INSERT trigger on table ORDERS.
+
+		Note: The body should contain only the SQL statements (without BEGIN/END or SET TERM).`),
 			mcp.WithString("database",
 				mcp.Required(),
 				mcp.Description("Database name (as defined in config.json)."),
@@ -311,11 +313,13 @@ Use this to quickly inspect table data without writing a full SELECT query.`),
 			"firebird_execute_immediate",
 			mcp.WithDescription(`Executes a SQL statement that may contain SET TERM blocks (e.g. CREATE PROCEDURE, CREATE GENERATOR, CREATE FUNCTION).
 
-This is for DDL statements that require the Firebird block delimiter. For regular DML/DDL, use firebird_query instead.
+		Uses the isql command-line tool to handle SET TERM blocks.
 
-Returns: a success message or an error.
+		For regular DML/DDL (CREATE TABLE, ALTER TABLE, etc.), use firebird_query instead.
 
-Example: "SET TERM ^ ; CREATE GENERATOR GEN_ORDERS ^ SET TERM ; ^"`),
+		Returns: a success message or an error.
+
+		Example: "SET TERM ^ ; CREATE GENERATOR GEN_ORDERS ^ SET TERM ; ^"`),
 			mcp.WithString("database",
 				mcp.Description("Database name (as defined in config.json). Defaults to the default database."),
 			),
@@ -766,17 +770,22 @@ func (h *Handler) HandleCreateTrigger(ctx context.Context, request mcp.CallToolR
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	client, err := firebird.NewClient(&h.Cfg.Server, dbCfg.Path)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	defer client.Close()
+	// Build trigger SQL with SET TERM
+	triggerSQL := fmt.Sprintf(
+		"SET TERM ^ ;\nCREATE TRIGGER \"%s\" FOR \"%s\"\n%s %s\nAS\nBEGIN\n%s\nEND ^\nSET TERM ; ^",
+		triggerName, tableName, timing, triggerType, body,
+	)
 
-	if err := client.CreateTrigger(ctx, triggerName, tableName, triggerType, timing, body); err != nil {
+	// Execute via isql
+	output, err := h.Cfg.Server.ExecuteWithISQL(ctx, dbCfg.Path, triggerSQL)
+	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to create trigger: %v", err)), nil
 	}
 
-	return mcp.NewToolResultText(fmt.Sprintf("Trigger '%s' created successfully on table '%s'.", triggerName, tableName)), nil
+	if output != "" {
+		return mcp.NewToolResultText(output), nil
+	}
+	return mcp.NewToolResultText(fmt.Sprintf("Trigger %s created on table %s.", triggerName, tableName)), nil
 }
 
 // HandleInsertBatch inserts multiple rows into a table in a single transaction.
@@ -906,6 +915,7 @@ func (h *Handler) HandleSample(ctx context.Context, request mcp.CallToolRequest)
 }
 
 // HandleExecuteImmediate executes a SQL statement that may contain SET TERM blocks.
+// It uses the isql command-line tool to handle SET TERM delimiters.
 func (h *Handler) HandleExecuteImmediate(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := request.GetArguments()
 
@@ -914,15 +924,25 @@ func (h *Handler) HandleExecuteImmediate(ctx context.Context, request mcp.CallTo
 		return mcp.NewToolResultError("The 'sql' argument is required and must be a string."), nil
 	}
 
-	client, cleanup, err := h.resolveDB(request)
+	// Get database config
+	dbName, _ := args["database"].(string)
+	if dbName == "" {
+		dbName = h.Cfg.Server.DefaultDatabase
+	}
+
+	db, err := h.Cfg.Server.FindDatabase(dbName)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	defer cleanup()
 
-	if err := client.ExecuteImmediate(ctx, sqlArg); err != nil {
+	// Execute via isql
+	output, err := h.Cfg.Server.ExecuteWithISQL(ctx, db.Path, sqlArg)
+	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Execution failed: %v", err)), nil
 	}
 
+	if output != "" {
+		return mcp.NewToolResultText(output), nil
+	}
 	return mcp.NewToolResultText("Statement executed successfully."), nil
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -302,11 +303,10 @@ func (c *Client) Sample(ctx context.Context, table, where string, limit int) (*Q
 	if limit <= 0 {
 		limit = 10
 	}
-	query := fmt.Sprintf("SELECT * FROM \"%s\"", table)
+	query := fmt.Sprintf("SELECT FIRST %d * FROM \"%s\"", limit, table)
 	if where != "" {
 		query += " WHERE " + where
 	}
-	query += fmt.Sprintf(" LIMIT %d", limit)
 	return c.Query(ctx, query)
 }
 
@@ -316,6 +316,37 @@ func (c *Client) Sample(ctx context.Context, table, where string, limit int) (*Q
 func (c *Client) ExecuteImmediate(ctx context.Context, sql string) error {
 	_, err := c.Exec(ctx, sql)
 	return err
+}
+
+// ExecuteWithISQL executes SQL via the isql command-line tool.
+// This is used for statements that require SET TERM blocks (procedures, generators, triggers).
+func (c *Client) ExecuteWithISQL(ctx context.Context, server *config.ServerConfig, dbPath, sql string) (string, error) {
+	// Find isql
+	isqlPath, err := server.FindISQL()
+	if err != nil {
+		return "", err
+	}
+
+	// Build isql command
+	cmd := exec.CommandContext(ctx, isqlPath,
+		"-user", server.User,
+		"-password", server.Password,
+		"-database", fmt.Sprintf("%s:%s@%s:%d/%s", server.User, server.Password, server.Host, server.Port, dbPath),
+	)
+
+	// Pass SQL via stdin
+	cmd.Stdin = strings.NewReader(sql)
+
+	// Capture output
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("isql execution failed: %w\nstderr: %s", err, stderr.String())
+	}
+
+	return stdout.String(), nil
 }
 
 // splitStatements splits a SQL script into individual statements.
@@ -457,24 +488,29 @@ type ColumnInfo struct {
 }
 
 // firebirdTypeNames maps RDB$FIELD_TYPE numbers to Firebird type names.
+// These are the standard Firebird type numbers (verified against RDB$FIELDS in Firebird 5).
+// Note: Type numbers may vary between Firebird versions or character sets.
 var firebirdTypeNames = map[int64]string{
-	7:  "SMALLINT",
-	8:  "INTEGER",
-	9:  "DATE",
-	10: "TIME",
-	11: "FLOAT",
-	12: "CHAR",
-	14: "DOUBLE",
-	20: "VARCHAR",
-	23: "TIMESTAMP",
-	27: "INT64",
-	35: "INT128",
-	37: "INT256",
-	40: "DECIMAL",
-	43: "NUMERIC",
-	45: "BLOB",
-	48: "NVARCHAR",
-	49: "BOOLEAN",
+	7:   "SMALLINT",
+	8:   "INTEGER",
+	9:   "DATE",
+	10:  "TIME",
+	11:  "FLOAT",
+	12:  "CHAR",
+	14:  "CHAR",
+	16:  "INT64",
+	20:  "VARCHAR",
+	23:  "BOOLEAN",
+	27:  "FLOAT",
+	29:  "TIMESTAMP",
+	35:  "TIMESTAMP",
+	37:  "VARCHAR",
+	40:  "DECIMAL",
+	43:  "NUMERIC",
+	45:  "BLOB",
+	48:  "NVARCHAR",
+	49:  "BOOLEAN",
+	261: "BLOB",
 }
 
 // FormatColumnType returns a human-readable type description for a column.
