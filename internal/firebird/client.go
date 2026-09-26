@@ -420,8 +420,8 @@ func (c *Client) ListTables(ctx context.Context) ([]TableInfo, error) {
 	query := `
 		SELECT
 			R.RDB$RELATION_NAME AS NAME,
-			CASE R.RDB$VIEW_BLR
-				WHEN NULL THEN 'TABLE'
+			CASE
+				WHEN R.RDB$VIEW_BLR IS NULL THEN 'TABLE'
 				ELSE 'VIEW'
 			END AS TYPE
 		FROM RDB$RELATIONS R
