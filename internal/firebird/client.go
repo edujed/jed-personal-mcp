@@ -748,6 +748,87 @@ func (c *Client) DescribeTable(ctx context.Context, tableName string) (*TableSch
 	return schema, nil
 }
 
+// ForeignKeyInfo represents a foreign key constraint.
+type ForeignKeyInfo struct {
+	ConstraintName string `json:"constraint_name"`
+	Table          string `json:"table"`
+	Column         string `json:"column"`
+	RefTable       string `json:"ref_table"`
+	RefColumn      string `json:"ref_column"`
+}
+
+// GetForeignKeys returns all foreign keys in the database.
+func (c *Client) GetForeignKeys(ctx context.Context) ([]ForeignKeyInfo, error) {
+	query := `
+		SELECT
+			c.RDB$CONSTRAINT_NAME AS CONSTRAINT_NAME,
+			c.RDB$RELATION_NAME AS TABLE_NAME,
+			pk.RDB$FIELD_NAME AS FK_COLUMN
+		FROM RDB$RELATION_CONSTRAINTS c
+		JOIN RDB$INDICES ci ON ci.RDB$INDEX_NAME = c.RDB$INDEX_NAME
+		JOIN RDB$INDEX_SEGMENTS pk ON pk.RDB$INDEX_NAME = ci.RDB$INDEX_NAME
+		WHERE c.RDB$CONSTRAINT_TYPE = 'FOREIGN KEY'
+		ORDER BY c.RDB$RELATION_NAME, c.RDB$CONSTRAINT_NAME
+	`
+
+	result, err := c.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get foreign keys: %w", err)
+	}
+
+	// Get all tables to infer reference tables
+	tablesResult, err := c.Query(ctx, "SELECT RDB$RELATION_NAME FROM RDB$RELATIONS WHERE RDB$SYSTEM_FLAG = 0")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tables: %w", err)
+	}
+	tableNames := make(map[string]bool)
+	for _, row := range tablesResult.Rows {
+		tableNames[getString(row, "RDB$RELATION_NAME")] = true
+	}
+
+	var fks []ForeignKeyInfo
+	for _, row := range result.Rows {
+		fkColumn := getString(row, "FK_COLUMN")
+		tableName := getString(row, "TABLE_NAME")
+		constraintName := getString(row, "CONSTRAINT_NAME")
+
+		// Infer reference table from FK column name (e.g., PERFIL_ID -> PERFIL)
+		refTable := ""
+		if strings.HasSuffix(fkColumn, "_ID") {
+			baseName := strings.TrimSuffix(fkColumn, "_ID")
+			if tableNames[baseName] {
+				refTable = baseName
+			}
+		}
+
+		// If we couldn't infer from column name, try from constraint name
+		if refTable == "" {
+			// Constraint names often follow pattern: FK_[TABLE]_[COLUMN]
+			parts := strings.Split(constraintName, "_")
+			if len(parts) >= 3 {
+				// Try to find a table that matches part of the constraint name
+				for i := 2; i < len(parts); i++ {
+					candidate := strings.Join(parts[2:i+1], "_")
+					if tableNames[candidate] {
+						refTable = candidate
+						break
+					}
+				}
+			}
+		}
+
+		fks = append(fks, ForeignKeyInfo{
+			ConstraintName: constraintName,
+			Table:          tableName,
+			Column:         fkColumn,
+			RefTable:       refTable,
+			RefColumn:      "ID", // Assume PK is ID
+		})
+	}
+
+	return fks, nil
+}
+
 // CreateTrigger creates a new trigger in the database.
 // It handles the SET TERM delimiter automatically.
 func (c *Client) CreateTrigger(ctx context.Context, triggerName, tableName, triggerType, timing, body string) error {

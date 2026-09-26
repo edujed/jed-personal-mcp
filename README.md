@@ -13,14 +13,15 @@ Is suitable for use with the [Zed Editor](https://zed.dev) in development tasks.
 - **`firebird_query`** — Execute a single SQL statement (SELECT, INSERT, UPDATE, CREATE TABLE, etc.)
 - **`firebird_show_tables`** — List all tables and views in the database
 - **`firebird_describe_table`** — Show the full schema of a table or view (columns, indexes, constraints, triggers)
+- **`firebird_describe_database`** — Complete database overview with tables, columns, and Mermaid ER diagram
 - **`firebird_get_databases`** — List all configured databases
 - **`firebird_create_database`** — Create a new Firebird database file (restricted to allowed paths)
 - **`firebird_run_script`** — Execute multiple SQL statements in a single transaction
-- **`firebird_create_trigger`** — Create a new trigger (handles SET TERM automatically)
+- **`firebird_create_trigger`** — Create a new trigger (uses isql for SET TERM support)
 - **`firebird_insert_batch`** — Insert multiple rows in a single transaction (prepared statement)
 - **`firebird_count`** — Count rows in a table (with optional WHERE)
 - **`firebird_sample`** — Get a sample of rows from a table (with optional WHERE and LIMIT)
-- **`firebird_execute_immediate`** — Execute statements with SET TERM blocks (procedures, generators)
+- **`firebird_execute_immediate`** — Execute statements with SET TERM blocks (uses isql)
 
 ## Prerequisites
 
@@ -227,6 +228,49 @@ PK_CLIENTS | PRIMARY KEY
 NAME | TYPE | SEQUENCE
 --- | --- | ---
 TRG_CLIENTS_AUDIT | 1 | 0
+```
+
+### `firebird_describe_database`
+
+Provides a complete overview of the database structure, including all tables, columns, and a Mermaid ER diagram showing relationships.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `database` | `string` | No | Database name (defaults to `default_database`) |
+| `include_counts` | `boolean` | No | If true, includes row counts for each table. May be slow for large tables. Defaults to `false`. |
+| `include_describes` | `boolean` | No | If true, includes column details for each table. Defaults to `true`. |
+
+**Example output:**
+
+```markdown
+### Database: teste
+
+#### Tables (9)
+
+**DEPARTAMENTO** (12 rows)
+  - ID (INTEGER, PK)
+  - NOME (VARCHAR(400))
+  - SIGLA (VARCHAR(40))
+  - ATIVO (SMALLINT)
+  - CRIADO_EM (TIMESTAMP, NOT NULL)
+  - ATUALIZADO_EM (TIMESTAMP, NOT NULL)
+
+**USUARIO** (216 rows)
+  - ID (INTEGER, PK)
+  - NOME (VARCHAR(400))
+  - EMAIL (VARCHAR(600))
+  - DEPARTAMENTO_ID (INTEGER, NOT NULL)
+  - ATIVO (SMALLINT)
+  - CRIADO_EM (TIMESTAMP, NOT NULL)
+  - ATUALIZADO_EM (TIMESTAMP, NOT NULL)
+
+#### Relationships (Mermaid)
+```mermaid
+erDiagram
+    DEPARTAMENTO ||--o{ USUARIO : "FK_USUARIO_DEPARTAMENTO"
+    USUARIO ||--o{ USUARIO_PERFIL : "FK_UP_USUARIO"
+    PERFIL ||--o{ USUARIO_PERFIL : "FK_UP_PERFIL"
+```
 ```
 
 ### `firebird_get_databases`

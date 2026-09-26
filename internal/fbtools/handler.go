@@ -330,6 +330,45 @@ Use this to quickly inspect table data without writing a full SELECT query.`),
 		),
 		h.HandleExecuteImmediate,
 	)
+
+	s.AddTool(
+		mcp.NewTool(
+			"firebird_describe_database",
+			mcp.WithDescription("Provides a complete overview of the database structure.\n\n"+
+				"Lists all tables with their columns, types, and constraints, and generates a Mermaid ER diagram showing all relationships.\n\n"+
+				"Returns (Markdown):\n"+
+				"- A summary of all tables with column details\n"+
+				"- A Mermaid ER diagram showing the complete relationship map\n\n"+
+				"Parameters:\n"+
+				"- database: Database name (as defined in config.json). Defaults to the default database.\n"+
+				"- include_counts: If true, includes row counts for each table (may be slow for large tables). Defaults to false.\n"+
+				"- include_describes: If true, includes column details for each table. Defaults to true.\n\n"+
+				"Example output:\n"+
+				"### Database: teste\n\n"+
+				"#### Tables (9)\n\n"+
+				"**DEPARTAMENTO** (12 rows)\n"+
+				"- ID (INTEGER, PK)\n"+
+				"- NOME (VARCHAR(400), UNIQUE)\n"+
+				"...\n\n"+
+				"#### Relationships (Mermaid)\n"+
+				"```mermaid\n"+
+				"erDiagram\n"+
+				"    DEPARTAMENTO ||--o{ USUARIO : \"has\"\n"+
+				"    USUARIO ||--o{ USUARIO_PERFIL : \"has\"\n"+
+				"    ...\n"+
+				"```"),
+			mcp.WithString("database",
+				mcp.Description("Database name (as defined in config.json). Defaults to the default database."),
+			),
+			mcp.WithBoolean("include_counts",
+				mcp.Description("If true, includes row counts for each table. May be slow for large tables. Defaults to false."),
+			),
+			mcp.WithBoolean("include_describes",
+				mcp.Description("If true, includes column details for each table. Defaults to true."),
+			),
+		),
+		h.HandleDescribeDatabase,
+	)
 }
 
 // --- Helpers ---
@@ -945,4 +984,138 @@ func (h *Handler) HandleExecuteImmediate(ctx context.Context, request mcp.CallTo
 		return mcp.NewToolResultText(output), nil
 	}
 	return mcp.NewToolResultText("Statement executed successfully."), nil
+}
+
+// HandleDescribeDatabase provides a complete overview of the database structure.
+func (h *Handler) HandleDescribeDatabase(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := request.GetArguments()
+
+	// Get database name
+	dbName, _ := args["database"].(string)
+	if dbName == "" {
+		dbName = h.Cfg.Server.DefaultDatabase
+	}
+
+	// Get include_counts flag
+	includeCounts, _ := args["include_counts"].(bool)
+
+	// Get include_describes flag (defaults to true)
+	includeDescribes := true
+	if v, ok := args["include_describes"].(bool); ok {
+		includeDescribes = v
+	}
+
+	// Resolve database
+	dbCfg, err := h.Cfg.Server.FindDatabase(dbName)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	client, err := firebird.NewClient(&h.Cfg.Server, dbCfg.Path)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	defer client.Close()
+
+	// Get all tables
+	tables, err := client.ListTables(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to list tables: %v", err)), nil
+	}
+
+	// Build output
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("### Database: %s\n\n", dbName))
+	sb.WriteString(fmt.Sprintf("#### Tables (%d)\n\n", len(tables)))
+
+	// Get foreign keys
+	fks, err := client.GetForeignKeys(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to get foreign keys: %v", err)), nil
+	}
+
+	// Process each table
+	for _, table := range tables {
+		if table.Type != "TABLE" {
+			continue // Skip views
+		}
+
+		sb.WriteString(fmt.Sprintf("**%s**", table.Name))
+
+		// Get row count if requested
+		if includeCounts {
+			count, err := client.Count(ctx, table.Name, "")
+			if err == nil {
+				sb.WriteString(fmt.Sprintf(" (%d rows)", count))
+			}
+		}
+		sb.WriteString("\n")
+
+		// Get table schema if includes describes
+		if includeDescribes {
+			schema, err := client.DescribeTable(ctx, table.Name)
+			if err != nil {
+				sb.WriteString("  - (failed to get schema)\n\n")
+				continue
+			}
+
+			// Add table comment if exists
+			if schema.Comments != nil {
+				if tableComment, ok := schema.Comments["table"]; ok && tableComment != "" {
+					sb.WriteString(fmt.Sprintf("  // %s\n", tableComment))
+				}
+			}
+
+			// Get PK columns from indexes (PK indexes have names starting with RDB$PRIMARY)
+			pkColumns := make(map[string]bool)
+			for _, idx := range schema.Indexes {
+				if strings.HasPrefix(idx.Name, "RDB$PRIMARY") {
+					for _, colName := range strings.Split(idx.Columns, ", ") {
+						pkColumns[strings.TrimSpace(colName)] = true
+					}
+				}
+			}
+
+			// List columns
+			for _, col := range schema.Columns {
+				colType := firebird.FormatColumnType(col)
+				colLine := fmt.Sprintf("  - %s (%s", col.Name, colType)
+
+				// Add PK/NOT NULL info
+				if pkColumns[col.Name] {
+					colLine += ", PK"
+				}
+				if col.Nullable == nil || col.Nullable == int64(0) {
+					colLine += ", NOT NULL"
+				}
+				colLine += ")"
+
+				// Add column comment if exists
+				if schema.Comments != nil {
+					if colComment, ok := schema.Comments[col.Name]; ok && colComment != "" {
+						colLine += fmt.Sprintf(" // %s", colComment)
+					}
+				}
+
+				sb.WriteString(colLine + "\n")
+			}
+		}
+
+		sb.WriteString("\n")
+	}
+
+	// Generate Mermaid ER diagram
+	sb.WriteString("#### Relationships (Mermaid)\n")
+	sb.WriteString("```mermaid\nerDiagram\n")
+
+	// Add relationships from foreign keys
+	for _, fk := range fks {
+		// Determine relationship type (simplified: assume 1:N for now)
+		sb.WriteString(fmt.Sprintf("    %s ||--o{ %s : \"%s\"\n",
+			fk.RefTable, fk.Table, fk.ConstraintName))
+	}
+
+	sb.WriteString("```\n")
+
+	return mcp.NewToolResultText(sb.String()), nil
 }
