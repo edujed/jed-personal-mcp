@@ -8,20 +8,31 @@ Is suitable for use with the [Zed Editor](https://zed.dev) in development tasks.
 
 > **Warning:** This tool is intended for local development only. It is not safe for production use.
 
+> **Note:** Backup and restore tools (gbak, nbackup) are intentionally not included, as this project is focused on development workflows. For production backup/restore, use the native Firebird tools directly.
+
 ## Features
 
+### Query & Data
 - **`firebird_query`** — Execute a single SQL statement (SELECT, INSERT, UPDATE, CREATE TABLE, etc.)
+- **`firebird_count`** — Count rows in a table (with optional WHERE)
+- **`firebird_sample`** — Get a sample of rows from a table (with optional WHERE and LIMIT)
+- **`firebird_insert_batch`** — Insert multiple rows in a single transaction (prepared statement)
+
+### Schema & Structure
 - **`firebird_show_tables`** — List all tables and views in the database
-- **`firebird_describe_table`** — Show the full schema of a table or view (columns, indexes, constraints, triggers)
+- **`firebird_describe_table`** — Show the full schema of a table or view (columns, indexes, constraints, triggers, comments)
 - **`firebird_describe_database`** — Complete database overview with tables, columns, and Mermaid ER diagram
 - **`firebird_get_databases`** — List all configured databases
+- **`firebird_list_procedures`** — List all stored procedures
+- **`firebird_list_functions`** — List all user-defined functions
+- **`firebird_list_domains`** — List all domains (named data types)
+
+### DDL & Advanced
 - **`firebird_create_database`** — Create a new Firebird database file (restricted to allowed paths)
 - **`firebird_run_script`** — Execute multiple SQL statements in a single transaction
 - **`firebird_create_trigger`** — Create a new trigger (uses isql for SET TERM support)
-- **`firebird_insert_batch`** — Insert multiple rows in a single transaction (prepared statement)
-- **`firebird_count`** — Count rows in a table (with optional WHERE)
-- **`firebird_sample`** — Get a sample of rows from a table (with optional WHERE and LIMIT)
-- **`firebird_execute_immediate`** — Execute statements with SET TERM blocks (uses isql)
+- **`firebird_execute_immediate`** — Execute statements with SET TERM blocks (procedures, generators, functions) (uses isql)
+- **`firebird_metadata_extract`** — Extract complete database metadata (DDL script) using isql -x
 
 ## Prerequisites
 
@@ -189,7 +200,7 @@ STATS | TABLE | -
 
 ### `firebird_describe_table`
 
-Shows the full schema of a table or view, including columns, indexes, constraints, triggers, and generators.
+Shows the full schema of a table or view, including columns (with type, size, nullability, default), indexes, constraints, triggers, and comments.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -205,10 +216,10 @@ Shows the full schema of a table or view, including columns, indexes, constraint
 
 NAME | TYPE | NULL | DEFAULT | POSITION
 --- | --- | --- | --- | ---
-ID | INT | NO | - | 1
+ID | INTEGER | NO | - | 1
 NAME | VARCHAR(100) | NO | - | 2
 EMAIL | VARCHAR(255) | YES | - | 3
-CREATED_AT | TIMESTAMP | NO | - | 4
+CREATED_AT | TIMESTAMP | NO | CURRENT_TIMESTAMP | 4
 
 #### Indexes
 
@@ -228,11 +239,18 @@ PK_CLIENTS | PRIMARY KEY
 NAME | TYPE | SEQUENCE
 --- | --- | ---
 TRG_CLIENTS_AUDIT | 1 | 0
+
+#### Comments
+
+COLUMN | COMMENT
+--- | ---
+ID | Primary key
+NAME | Customer full name
 ```
 
 ### `firebird_describe_database`
 
-Provides a complete overview of the database structure, including all tables, columns, and a Mermaid ER diagram showing relationships.
+Provides a complete overview of the database structure, including all tables with column details, row counts (optional), and a Mermaid ER diagram showing all relationships.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -245,31 +263,38 @@ Provides a complete overview of the database structure, including all tables, co
 ```markdown
 ### Database: teste
 
-#### Tables (9)
+#### Tables (19)
 
-**DEPARTAMENTO** (12 rows)
+**DEPARTAMENTO** (14 rows)
   - ID (INTEGER, PK)
   - NOME (VARCHAR(400))
   - SIGLA (VARCHAR(40))
   - ATIVO (SMALLINT)
   - CRIADO_EM (TIMESTAMP, NOT NULL)
   - ATUALIZADO_EM (TIMESTAMP, NOT NULL)
+  - PAI_ID (INTEGER, NOT NULL)
+  - TIPO (VARCHAR(80), NOT NULL)
+  - FILIAL_ID (INTEGER, NOT NULL)
 
-**USUARIO** (216 rows)
+**USUARIO** (220 rows)
   - ID (INTEGER, PK)
   - NOME (VARCHAR(400))
   - EMAIL (VARCHAR(600))
-  - DEPARTAMENTO_ID (INTEGER, NOT NULL)
+  - SENHA_HASH (VARCHAR(1020))
   - ATIVO (SMALLINT)
   - CRIADO_EM (TIMESTAMP, NOT NULL)
   - ATUALIZADO_EM (TIMESTAMP, NOT NULL)
+  - SALARIO (INT64, NOT NULL)
+  - MATRICULA (VARCHAR(80), NOT NULL)
 
 #### Relationships (Mermaid)
 ```mermaid
 erDiagram
-    DEPARTAMENTO ||--o{ USUARIO : "FK_USUARIO_DEPARTAMENTO"
-    USUARIO ||--o{ USUARIO_PERFIL : "FK_UP_USUARIO"
+    DEPARTAMENTO ||--o{ DEPARTAMENTO : "FK_DEPTO_PAI"
+    USUARIO ||--o{ USUARIO_DEPARTAMENTO : "INTEG_53"
+    DEPARTAMENTO ||--o{ USUARIO_DEPARTAMENTO : "INTEG_55"
     PERFIL ||--o{ USUARIO_PERFIL : "FK_UP_PERFIL"
+    USUARIO ||--o{ USUARIO_PERFIL : "FK_UP_USUARIO"
 ```
 ```
 
@@ -383,12 +408,28 @@ ID | NAME | STATUS
 
 ### `firebird_execute_immediate`
 
-Executes a SQL statement that may contain SET TERM blocks (e.g. CREATE PROCEDURE, CREATE GENERATOR, CREATE FUNCTION). For regular DML/DDL, use `firebird_query` instead.
+Executes a SQL statement that may contain SET TERM blocks (e.g. CREATE PROCEDURE, CREATE GENERATOR, CREATE FUNCTION). Uses the isql command-line tool to handle SET TERM delimiters.
+
+For regular DML/DDL (CREATE TABLE, ALTER TABLE, etc.), use `firebird_query` instead.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `database` | `string` | No | Database name (defaults to `default_database`) |
 | `sql` | `string` | Yes | The SQL statement to execute (may include SET TERM blocks) |
+
+**Example:**
+
+```sql
+SET TERM ^ ;
+CREATE OR ALTER PROCEDURE SP_EXAMPLE
+RETURNS (X INTEGER)
+AS
+BEGIN
+    X = 1;
+    SUSPEND;
+END^
+SET TERM ; ^
+```
 
 **Example output:**
 
@@ -396,27 +437,153 @@ Executes a SQL statement that may contain SET TERM blocks (e.g. CREATE PROCEDURE
 Statement executed successfully.
 ```
 
+### `firebird_list_procedures`
+
+Lists all stored procedures in the database.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `database` | `string` | No | Database name (defaults to `default_database`) |
+
+**Example output:**
+
+```markdown
+### Stored Procedures
+
+Count: 3 procedures
+
+NAME | PARAMETERS | RETURNS | DESCRIPTION
+--- | --- | --- | ---
+SP_EXAMPLE | 1 | 2 | Example procedure
+SP_CALCULATE | 2 | 1 | Calculates a value
+SP_LISTAR_CHEFES | 1 | 5 | Lists the chain of managers for a user
+```
+
+### `firebird_list_functions`
+
+Lists all user-defined functions in the database.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `database` | `string` | No | Database name (defaults to `default_database`) |
+
+**Example output:**
+
+```markdown
+### User-Defined Functions
+
+Count: 2 functions
+
+NAME | PARAMETERS | RETURN TYPE | DESCRIPTION
+--- | --- | --- | ---
+FN_CALCULATE | 2 | INTEGER | Calculates a value
+FN_FORMAT | 1 | VARCHAR | Formats a string
+```
+
+### `firebird_list` (type=DOMAINS)
+
+Lists all domains (named data types) in the database. Domains are reusable data type definitions that can be applied to multiple columns.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `type` | `string` | Yes | Must be `DOMAINS` |
+| `database` | `string` | No | Database name (defaults to `default_database`) |
+
+**Example output:**
+
+```markdown
+### Domains (Named Data Types)
+
+Count: 2 domains
+
+NAME | TYPE | DEFAULT | NULL
+--- | --- | --- | ---
+DOM_EMAIL | VARCHAR(255) | - | YES
+DOM_MONEY | NUMERIC(18,2) | - | YES
+```
+
+> **Note:** The TYPE column now shows the full type with size/precision (e.g., `VARCHAR(100)`, `NUMERIC(14,2)`, `DATE`, `TIMESTAMP`). Character sizes are converted from bytes to characters (UTF8 = 4 bytes/char).
+
+### `firebird_metadata_extract`
+
+Extracts complete database metadata using `isql -x` (extract mode). Returns the full DDL script for the database, including:
+- CREATE DATABASE
+- CREATE TABLE statements
+- CREATE INDEX statements
+- CREATE VIEW statements
+- CREATE PROCEDURE statements
+- CREATE FUNCTION statements
+- CREATE TRIGGER statements
+- GRANT statements
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `database` | `string` | No | Database name (defaults to `default_database`) |
+
+**Example output:**
+
+```sql
+/*CREATE DATABASE*/
+CREATE DATABASE 'localhost/3050:/database/teste.fdb' USER 'SYSDBA' PASSWORD 'masterkey' PAGE_SIZE 4096;
+
+/*CREATE TABLE*/
+CREATE TABLE DEPARTAMENTO (
+    ID INTEGER NOT NULL,
+    NOME VARCHAR(400),
+    SIGLA VARCHAR(40),
+    ATIVO SMALLINT,
+    CRIADO_EM TIMESTAMP NOT NULL,
+    ATUALIZADO_EM TIMESTAMP NOT NULL,
+    PAI_ID INTEGER NOT NULL,
+    TIPO VARCHAR(80) NOT NULL,
+    FILIAL_ID INTEGER NOT NULL,
+    CONSTRAINT INTEG_1 PRIMARY KEY (ID)
+);
+
+/*CREATE INDEX*/
+CREATE INDEX FK_DEPTO_PAI ON DEPARTAMENTO (PAI_ID);
+
+/*CREATE PROCEDURE*/
+SET TERM ^ ;
+CREATE PROCEDURE SP_LISTAR_CHEFES (P_USUARIO_ID INTEGER)
+RETURNS (
+    NIVEL INTEGER,
+    CHEFE_ID INTEGER,
+    CHEFE_NOME VARCHAR(400),
+    DEPARTAMENTO VARCHAR(400),
+    DEPARTAMENTO_SIGLA VARCHAR(40)
+)
+AS
+BEGIN
+    /* Procedure body */
+END^
+SET TERM ; ^
+```
+
 ## Project Structure
 
 ```
 ├── main.go                  # Entry point: loads config, creates server, starts Stdio
 ├── config.json              # Server and database configuration
+├── scripts/
+│   └── build.sh             # Build script for multiple platforms
 ├── internal/
 │   ├── config/
-│   │   └── config.go        # Config loading, validation, and DSN building
+│   │   └── config.go        # Config loading, validation, DSN building, isql execution
 │   ├── firebird/
 │   │   └── client.go        # Firebird DB client: queries, schema introspection, DDL
 │   └── fbtools/
-│       └── handler.go       # Firebird MCP tool handlers + registration
+│       ├── handler.go       # Firebird MCP tool handlers + registration
+│       └── handler_test.go  # Unit tests for formatting functions
 ├── go.mod
 └── README.md
 ```
 
 ### Design
 
-- **`internal/config`** — Loads and validates `config.json`. Exposes DSN builders and path validation.
-- **`internal/firebird`** — Data access layer. Wraps `database/sql` with typed schema introspection (tables, columns, indexes, constraints, triggers, generators).
-- **`internal/fbtools`** — Firebird-specific MCP tool handlers and registration. Exposes `Register(s, h)` to wire all Firebird tools into the server.
+- **`internal/config`** — Loads and validates `config.json`. Exposes DSN builders, path validation, and isql execution for SET TERM blocks.
+- **`internal/firebird`** — Data access layer. Wraps `database/sql` with typed schema introspection (tables, columns, indexes, constraints, triggers, generators) and batch operations.
+- **`internal/fbtools`** — Firebird-specific MCP tool handlers and registration. Exposes `Register(s, h)` to wire all Firebird tools into the server. All outputs are formatted as Markdown for token efficiency.
 - **`main.go`** — Thin entry point. Wires config → handler → MCP server.
 
 ### Extending with new database engines
@@ -428,6 +595,33 @@ To add support for another engine (e.g. PostgreSQL):
 3. In `main.go`, call `pgtools.Register(s, pgHandler)` alongside `fbtools.Register(s, fbHandler)`
 
 Each engine is fully self-contained under `internal/`, keeping the entry point minimal.
+
+## Optimized Build for Deployment
+
+For production deployment, use the build script which applies optimization flags:
+
+```bash
+./scripts/build.sh linux
+```
+
+This produces a static binary with:
+- `CGO_ENABLED=0` — no C dependencies
+- `-trimpath` — removes local file paths from the binary
+- `-ldflags="-s -w"` — strips symbol table and DWARF debugging info
+
+**Example output:**
+
+```
+==> Building linux/amd64 -> bin/jed-personal-mcp-linux-amd64
+==> Building linux/arm64 -> bin/jed-personal-mcp-linux-arm64
+
+Build complete. Binaries in: bin/
+total 16M
+-rwxr-xr-x 1 user user 8.1M Sep 30 19:00 jed-personal-mcp-linux-amd64
+-rwxr-xr-x 1 user user 7.8M Sep 30 19:00 jed-personal-mcp-linux-arm64
+```
+
+The resulting binary is ~8 MB and can be deployed to any compatible Linux system without additional dependencies.
 
 ## License
 

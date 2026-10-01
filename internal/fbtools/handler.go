@@ -63,31 +63,6 @@ Note: Do NOT use SET TERM delimiters. For multiple statements, use firebird_run_
 
 	s.AddTool(
 		mcp.NewTool(
-			"firebird_show_tables",
-			mcp.WithDescription(`Lists all user tables and views in the Firebird database.
-
-Returns (Markdown):
-A table with columns NAME, TYPE (TABLE or VIEW), and COMMENT (if any).
-
-Example output:
-### Tables and Views (5)
-
-NAME | TYPE | COMMENT
---- | --- | ---
-CLIENTS | TABLE | Customer records
-ORDERS | TABLE | Order data
-ORDERS_VIEW | VIEW | Orders with client info
-
-Use this first to discover what tables exist before querying them.`),
-			mcp.WithString("database",
-				mcp.Description("Database name (as defined in config.json). Defaults to the default database."),
-			),
-		),
-		h.HandleShowTables,
-	)
-
-	s.AddTool(
-		mcp.NewTool(
 			"firebird_describe_table",
 			mcp.WithDescription(`Shows the full schema of a table or view: columns (with type, size, nullability, default), indexes, constraints, triggers, and comments.
 
@@ -369,6 +344,163 @@ Use this to quickly inspect table data without writing a full SELECT query.`),
 		),
 		h.HandleDescribeDatabase,
 	)
+
+	s.AddTool(
+		mcp.NewTool(
+			"firebird_list",
+			mcp.WithDescription(`Lists database objects by type.
+
+Supported types:
+- TABLES: Lists all tables and views
+- PROCEDURES: Lists all stored procedures
+- FUNCTIONS: Lists all user-defined functions
+- DOMAINS: Lists all domains (named data types)
+- TRIGGERS: Lists all triggers
+- INDEXES: Lists all indexes
+- SEQUENCES: Lists all sequences
+
+Returns (Markdown):
+- A title with the count of objects
+- A table with relevant columns for each type
+
+Example output (TABLES):
+### Tables and Views (5)
+
+NAME | TYPE | COMMENT
+--- | --- | ---
+CLIENTS | TABLE | Customer records
+ORDERS | TABLE | Order data
+
+Example output (PROCEDURES):
+### Stored Procedures
+
+Count: 3 procedures
+
+NAME | PARAMETERS | RETURNS | DESCRIPTION
+--- | --- | --- | ---
+SP_EXAMPLE | 1 | 2 | Example procedure`),
+			mcp.WithString("type",
+				mcp.Required(),
+				mcp.Description("The object type: TABLES, PROCEDURES, FUNCTIONS, DOMAINS, TRIGGERS, INDEXES, or SEQUENCES"),
+			),
+			mcp.WithString("database",
+				mcp.Description("Database name (as defined in config.json). Defaults to the default database."),
+			),
+		),
+		h.HandleList,
+	)
+
+	s.AddTool(
+		mcp.NewTool(
+			"firebird_metadata_extract",
+			mcp.WithDescription(`Extracts complete database metadata using isql -x (extract mode).
+
+This returns the full DDL script for the database, including:
+- CREATE DATABASE
+- CREATE TABLE statements
+- CREATE INDEX statements
+- CREATE VIEW statements
+- CREATE PROCEDURE statements
+- CREATE FUNCTION statements
+- CREATE TRIGGER statements
+- GRANT statements
+
+The output is a SQL script that can be used to recreate the database structure.
+
+Returns: The raw SQL script from isql -x (stdout).
+
+Note: This can be a large output for databases with many objects.`),
+			mcp.WithString("database",
+				mcp.Description("Database name (as defined in config.json). Defaults to the default database."),
+			),
+		),
+		h.HandleMetadataExtract,
+	)
+
+	s.AddTool(
+		mcp.NewTool(
+			"firebird_alter_column_type",
+			mcp.WithDescription(`Changes the data type of a column to use a domain.
+
+Uses the Firebird syntax: ALTER TABLE table_name ALTER column_name TYPE domain_name;
+
+Parameters:
+- table: The table name
+- column: The column name
+- domain: The domain name to apply
+
+Example: Changes column NOME in table CLIENTS to use domain D_REQUIRED_VARCHAR_100
+firebird_alter_column_type(table="CLIENTS", column="NOME", domain="D_REQUIRED_VARCHAR_100")
+
+Returns: A success message or an error.
+
+IMPORTANT - Key Constraints: If the column is part of a Primary Key (PK), Foreign Key (FK), or has a UNIQUE constraint, Firebird will block the alteration. In these cases, you must:
+1. Drop the constraint first
+2. Alter the column type
+3. Recreate the constraint
+
+Example for a PK column:
+-- Drop the PK
+ALTER TABLE CLIENTS DROP CONSTRAINT PK_CLIENTS;
+-- Alter the column
+firebird_alter_column_type(table="CLIENTS", column="ID", domain="D_REQUIRED_INTEGER")
+-- Recreate the PK
+ALTER TABLE CLIENTS ADD CONSTRAINT PK_CLIENTS PRIMARY KEY (ID);`),
+			mcp.WithString("table",
+				mcp.Required(),
+				mcp.Description("The table name"),
+			),
+			mcp.WithString("column",
+				mcp.Required(),
+				mcp.Description("The column name"),
+			),
+			mcp.WithString("domain",
+				mcp.Required(),
+				mcp.Description("The domain name to apply"),
+			),
+			mcp.WithString("database",
+				mcp.Description("Database name (as defined in config.json). Defaults to the default database."),
+			),
+		),
+		h.HandleAlterColumnType,
+	)
+
+	s.AddTool(
+		mcp.NewTool(
+			"firebird_drop",
+			mcp.WithDescription(`Drops a database object by type and name.
+
+Supported types:
+- TABLE: DROP TABLE name
+- VIEW: DROP VIEW name
+- DOMAIN: DROP DOMAIN name
+- TRIGGER: DROP TRIGGER name
+- PROCEDURE: DROP PROCEDURE name
+- FUNCTION: DROP FUNCTION name
+- INDEX: DROP INDEX name
+- SEQUENCE: DROP SEQUENCE name
+
+Returns: A success message or an error.
+
+Example: Drops table CLIENTS
+firebird_drop(type="TABLE", name="CLIENTS")
+
+Example: Drops procedure SP_EXAMPLE
+firebird_drop(type="PROCEDURE", name="SP_EXAMPLE")`),
+			mcp.WithString("type",
+				mcp.Required(),
+				mcp.Description("The object type: TABLE, VIEW, DOMAIN, TRIGGER, PROCEDURE, FUNCTION, INDEX, or SEQUENCE"),
+			),
+			mcp.WithString("name",
+				mcp.Required(),
+				mcp.Description("The name of the object to drop"),
+			),
+			mcp.WithString("database",
+				mcp.Description("Database name (as defined in config.json). Defaults to the default database."),
+			),
+		),
+		h.HandleDrop,
+	)
 }
 
 // --- Helpers ---
@@ -471,6 +603,14 @@ func pluralSuffix(n int) string {
 func formatCell(v any) string {
 	if v == nil {
 		return "NULL"
+	}
+
+	// Format boolean values
+	if b, ok := v.(bool); ok {
+		if b {
+			return "true"
+		}
+		return "false"
 	}
 
 	// Format time.Time values with appropriate layout
@@ -589,10 +729,14 @@ func formatSchema(schema *firebird.TableSchema) string {
 	// Columns
 	if len(schema.Columns) > 0 {
 		b.WriteString("#### Columns\n\n")
-		b.WriteString("NAME | TYPE | NULL | DEFAULT | POSITION\n")
-		b.WriteString("--- | --- | --- | --- | ---\n")
+		b.WriteString("NAME | TYPE | DOMAIN | NULL | DEFAULT | POSITION\n")
+		b.WriteString("--- | --- | --- | --- | --- | ---\n")
 		for _, col := range schema.Columns {
 			typeName := firebird.FormatColumnType(col)
+			domain := "-"
+			if col.Domain != "" {
+				domain = col.Domain
+			}
 			nullable := "NO"
 			if firebird.ToInt64(col.Nullable) == 1 {
 				nullable = "YES"
@@ -605,7 +749,7 @@ func formatSchema(schema *firebird.TableSchema) string {
 			if col.Position != nil {
 				pos = fmt.Sprintf("%v", col.Position)
 			}
-			fmt.Fprintf(&b, "%s | %s | %s | %s | %s\n", col.Name, typeName, nullable, def, pos)
+			fmt.Fprintf(&b, "%s | %s | %s | %s | %s | %s\n", col.Name, typeName, domain, nullable, def, pos)
 		}
 		b.WriteString("\n")
 	}
@@ -1116,6 +1260,430 @@ func (h *Handler) HandleDescribeDatabase(ctx context.Context, request mcp.CallTo
 	}
 
 	sb.WriteString("```\n")
+
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
+// HandleMetadataExtract extracts complete database metadata using isql -x.
+func (h *Handler) HandleMetadataExtract(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := request.GetArguments()
+
+	// Get database name
+	dbName, _ := args["database"].(string)
+	if dbName == "" {
+		dbName = h.Cfg.Server.DefaultDatabase
+	}
+
+	db, err := h.Cfg.Server.FindDatabase(dbName)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	// Execute isql -x to extract metadata
+	output, err := h.Cfg.Server.ExecuteMetadataExtract(ctx, db.Path)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Metadata extraction failed: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(output), nil
+}
+
+// HandleAlterColumnType changes the data type of a column to use a domain.
+func (h *Handler) HandleAlterColumnType(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := request.GetArguments()
+
+	table, _ := args["table"].(string)
+	column, _ := args["column"].(string)
+	domain, _ := args["domain"].(string)
+
+	if table == "" || column == "" || domain == "" {
+		return mcp.NewToolResultError("table, column, and domain are required"), nil
+	}
+
+	client, cleanup, err := h.resolveDB(request)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	defer cleanup()
+
+	sql := fmt.Sprintf(`ALTER TABLE %s ALTER %s TYPE %s`, table, column, domain)
+	_, err = client.Exec(ctx, sql)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to alter column type: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Column %s.%s type changed to %s.", table, column, domain)), nil
+}
+
+// HandleDrop drops a database object by type and name.
+func (h *Handler) HandleDrop(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := request.GetArguments()
+
+	objType, _ := args["type"].(string)
+	name, _ := args["name"].(string)
+
+	if objType == "" || name == "" {
+		return mcp.NewToolResultError("Both 'type' and 'name' arguments are required."), nil
+	}
+
+	objType = strings.ToUpper(strings.TrimSpace(objType))
+	name = strings.TrimSpace(name)
+
+	// Validate object type
+	validTypes := map[string]bool{
+		"TABLE": true, "VIEW": true, "DOMAIN": true, "TRIGGER": true,
+		"PROCEDURE": true, "FUNCTION": true, "INDEX": true, "SEQUENCE": true,
+	}
+	if !validTypes[objType] {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid type: %s. Valid types: TABLE, VIEW, DOMAIN, TRIGGER, PROCEDURE, FUNCTION, INDEX, SEQUENCE", objType)), nil
+	}
+
+	// Validate name
+	if !firebird.IsValidIdentifier(name) {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid name: %s", name)), nil
+	}
+
+	client, cleanup, err := h.resolveDB(request)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	defer cleanup()
+
+	// Build DROP statement
+	var sql string
+	switch objType {
+	case "TABLE":
+		sql = fmt.Sprintf(`DROP TABLE "%s"`, name)
+	case "VIEW":
+		sql = fmt.Sprintf(`DROP VIEW "%s"`, name)
+	case "DOMAIN":
+		sql = fmt.Sprintf(`DROP DOMAIN "%s"`, name)
+	case "TRIGGER":
+		sql = fmt.Sprintf(`DROP TRIGGER "%s"`, name)
+	case "PROCEDURE":
+		sql = fmt.Sprintf(`DROP PROCEDURE "%s"`, name)
+	case "FUNCTION":
+		sql = fmt.Sprintf(`DROP FUNCTION "%s"`, name)
+	case "INDEX":
+		sql = fmt.Sprintf(`DROP INDEX "%s"`, name)
+	case "SEQUENCE":
+		sql = fmt.Sprintf(`DROP SEQUENCE "%s"`, name)
+	}
+
+	_, err = client.Exec(ctx, sql)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to drop %s %s: %v", objType, name, err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Dropped %s %s.", objType, name)), nil
+}
+
+// HandleList lists database objects by type (PROCEDURES, FUNCTIONS, DOMAINS).
+func (h *Handler) HandleList(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := request.GetArguments()
+
+	objType, _ := args["type"].(string)
+	if objType == "" {
+		return mcp.NewToolResultError("The 'type' argument is required."), nil
+	}
+
+	objType = strings.ToUpper(strings.TrimSpace(objType))
+
+	// Validate object type
+	validTypes := map[string]bool{
+		"TABLES": true, "PROCEDURES": true, "FUNCTIONS": true, "DOMAINS": true,
+		"TRIGGERS": true, "INDEXES": true, "SEQUENCES": true,
+	}
+	if !validTypes[objType] {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid type: %s. Valid types: TABLES, PROCEDURES, FUNCTIONS, DOMAINS, TRIGGERS, INDEXES, SEQUENCES", objType)), nil
+	}
+
+	client, cleanup, err := h.resolveDB(request)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	defer cleanup()
+
+	var sb strings.Builder
+
+	switch objType {
+	case "TABLES":
+		tables, err := client.ListTables(ctx)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to list tables: %v", err)), nil
+		}
+
+		count := len(tables)
+		sb.WriteString(fmt.Sprintf("### Tables and Views (%d)\n\n", count))
+		if count == 0 {
+			sb.WriteString("No tables or views found.\n")
+			return mcp.NewToolResultText(sb.String()), nil
+		}
+
+		sb.WriteString("NAME | TYPE | COMMENT\n")
+		sb.WriteString("--- | --- | ---\n")
+
+		for _, table := range tables {
+			comment := table.Comment
+			if comment == "" {
+				comment = "-"
+			}
+			sb.WriteString(fmt.Sprintf("%s | %s | %s\n", table.Name, table.Type, comment))
+		}
+
+	case "PROCEDURES":
+		result, err := client.Query(ctx, `SELECT
+			RDB$PROCEDURE_NAME,
+			RDB$PROCEDURE_INPUTS,
+			RDB$PROCEDURE_OUTPUTS,
+			RDB$DESCRIPTION
+		FROM RDB$PROCEDURES
+		ORDER BY RDB$PROCEDURE_NAME`)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to list procedures: %v", err)), nil
+		}
+
+		count := len(result.Rows)
+		sb.WriteString("### Stored Procedures\n\n")
+		if count == 0 {
+			sb.WriteString("No stored procedures found.\n")
+			return mcp.NewToolResultText(sb.String()), nil
+		}
+
+		sb.WriteString(fmt.Sprintf("Count: %d procedures\n\n", count))
+		sb.WriteString("NAME | PARAMETERS | RETURNS | DESCRIPTION\n")
+		sb.WriteString("--- | --- | --- | ---\n")
+
+		for _, row := range result.Rows {
+			name, _ := row["RDB$PROCEDURE_NAME"].(string)
+			params := firebird.ToInt64(row["RDB$PROCEDURE_INPUTS"])
+			returns := firebird.ToInt64(row["RDB$PROCEDURE_OUTPUTS"])
+			desc, _ := row["RDB$DESCRIPTION"].(string)
+			if desc == "" {
+				desc = "-"
+			}
+			sb.WriteString(fmt.Sprintf("%s | %d | %d | %s\n", name, params, returns, desc))
+		}
+
+	case "FUNCTIONS":
+		result, err := client.Query(ctx, `SELECT
+			RDB$FUNCTION_NAME,
+			RDB$FUNCTION_TYPE,
+			RDB$DESCRIPTION
+		FROM RDB$FUNCTIONS
+		ORDER BY RDB$FUNCTION_NAME`)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to list functions: %v", err)), nil
+		}
+
+		count := len(result.Rows)
+		sb.WriteString("### User-Defined Functions\n\n")
+		if count == 0 {
+			sb.WriteString("No user-defined functions found.\n")
+			return mcp.NewToolResultText(sb.String()), nil
+		}
+
+		sb.WriteString(fmt.Sprintf("Count: %d functions\n\n", count))
+		sb.WriteString("NAME | TYPE | DESCRIPTION\n")
+		sb.WriteString("--- | --- | ---\n")
+
+		for _, row := range result.Rows {
+			name, _ := row["RDB$FUNCTION_NAME"].(string)
+			fnType := firebird.ToInt64(row["RDB$FUNCTION_TYPE"])
+			desc, _ := row["RDB$DESCRIPTION"].(string)
+			if desc == "" {
+				desc = "-"
+			}
+			typeName := "-"
+			if fnType == 0 {
+				typeName = "SQL"
+			} else if fnType == 1 {
+				typeName = "PASM"
+			}
+			sb.WriteString(fmt.Sprintf("%s | %s | %s\n", name, typeName, desc))
+		}
+
+	case "DOMAINS":
+		result, err := client.Query(ctx, `SELECT
+			RDB$FIELD_NAME,
+			RDB$FIELD_TYPE,
+			RDB$FIELD_LENGTH,
+			RDB$FIELD_PRECISION,
+			RDB$FIELD_SCALE,
+			RDB$DEFAULT_SOURCE,
+			RDB$NULL_FLAG,
+			RDB$DESCRIPTION
+		FROM RDB$FIELDS
+		WHERE RDB$SYSTEM_FLAG = 0
+		  AND RDB$FIELD_NAME NOT LIKE 'RDB$%'
+		  AND RDB$FIELD_NAME NOT LIKE 'MON$%'
+		  AND RDB$FIELD_NAME NOT LIKE 'SEC$%'
+		ORDER BY RDB$FIELD_NAME`)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to list domains: %v", err)), nil
+		}
+
+		count := len(result.Rows)
+		sb.WriteString("### Domains (Named Data Types)\n\n")
+		if count == 0 {
+			sb.WriteString("No domains found.\n")
+			return mcp.NewToolResultText(sb.String()), nil
+		}
+
+		sb.WriteString(fmt.Sprintf("Count: %d domains\n\n", count))
+		sb.WriteString("NAME | TYPE | DEFAULT | NULL\n")
+		sb.WriteString("--- | --- | --- | ---\n")
+
+		for _, row := range result.Rows {
+			name, _ := row["RDB$FIELD_NAME"].(string)
+			fieldType := firebird.ToInt64(row["RDB$FIELD_TYPE"])
+			length := firebird.ToInt64(row["RDB$FIELD_LENGTH"])
+			precision := firebird.ToInt64(row["RDB$FIELD_PRECISION"])
+			scale := firebird.ToInt64(row["RDB$FIELD_SCALE"])
+			defaultSource, _ := row["RDB$DEFAULT_SOURCE"].(string)
+			nullFlag := firebird.ToInt64(row["RDB$NULL_FLAG"])
+			desc, _ := row["RDB$DESCRIPTION"].(string)
+
+			// Use FormatColumnTypeWithMeta for accurate type formatting
+			// This handles:
+			// - Type 8: INTEGER vs NUMERIC (based on precision)
+			// - Type 12: DATE (not CHAR)
+			// - Type 16: NUMERIC vs INT64 (based on precision)
+			// - Character types: bytes → characters conversion
+			typeName := firebird.FormatColumnTypeWithMeta(fieldType, length, precision, scale)
+			defStr := "-"
+			if defaultSource != "" {
+				defStr = defaultSource
+			}
+			nullStr := "YES"
+			if nullFlag == 1 {
+				nullStr = "NO"
+			}
+			if desc == "" {
+				desc = "-"
+			}
+			sb.WriteString(fmt.Sprintf("%s | %s | %s | %s\n", name, typeName, defStr, nullStr))
+		}
+
+	case "TRIGGERS":
+		result, err := client.Query(ctx, `SELECT
+			RDB$TRIGGER_NAME,
+			RDB$TRIGGER_TYPE,
+			RDB$RELATION_NAME,
+			RDB$DESCRIPTION
+		FROM RDB$TRIGGERS
+		WHERE RDB$SYSTEM_FLAG = 0
+		ORDER BY RDB$TRIGGER_NAME`)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to list triggers: %v", err)), nil
+		}
+
+		count := len(result.Rows)
+		sb.WriteString("### Triggers\n\n")
+		if count == 0 {
+			sb.WriteString("No triggers found.\n")
+			return mcp.NewToolResultText(sb.String()), nil
+		}
+
+		sb.WriteString(fmt.Sprintf("Count: %d triggers\n\n", count))
+		sb.WriteString("NAME | TYPE | TABLE | DESCRIPTION\n")
+		sb.WriteString("--- | --- | --- | ---\n")
+
+		for _, row := range result.Rows {
+			name, _ := row["RDB$TRIGGER_NAME"].(string)
+			trigType := firebird.ToInt64(row["RDB$TRIGGER_TYPE"])
+			table, _ := row["RDB$RELATION_NAME"].(string)
+			desc, _ := row["RDB$DESCRIPTION"].(string)
+			if desc == "" {
+				desc = "-"
+			}
+			typeName := "-"
+			if trigType == 1 {
+				typeName = "BEFORE INSERT"
+			} else if trigType == 2 {
+				typeName = "BEFORE UPDATE"
+			} else if trigType == 4 {
+				typeName = "BEFORE DELETE"
+			} else if trigType == 8 {
+				typeName = "AFTER INSERT"
+			} else if trigType == 16 {
+				typeName = "AFTER UPDATE"
+			} else if trigType == 32 {
+				typeName = "AFTER DELETE"
+			}
+			sb.WriteString(fmt.Sprintf("%s | %s | %s | %s\n", name, typeName, table, desc))
+		}
+
+	case "INDEXES":
+		result, err := client.Query(ctx, `SELECT
+			RDB$INDEX_NAME,
+			RDB$RELATION_NAME,
+			RDB$UNIQUE_FLAG,
+			RDB$DESCRIPTION
+		FROM RDB$INDICES
+		WHERE RDB$SYSTEM_FLAG = 0
+		ORDER BY RDB$INDEX_NAME`)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to list indexes: %v", err)), nil
+		}
+
+		count := len(result.Rows)
+		sb.WriteString("### Indexes\n\n")
+		if count == 0 {
+			sb.WriteString("No indexes found.\n")
+			return mcp.NewToolResultText(sb.String()), nil
+		}
+
+		sb.WriteString(fmt.Sprintf("Count: %d indexes\n\n", count))
+		sb.WriteString("NAME | TABLE | UNIQUE | DESCRIPTION\n")
+		sb.WriteString("--- | --- | --- | ---\n")
+
+		for _, row := range result.Rows {
+			name, _ := row["RDB$INDEX_NAME"].(string)
+			table, _ := row["RDB$RELATION_NAME"].(string)
+			uniqueFlag := firebird.ToInt64(row["RDB$UNIQUE_FLAG"])
+			desc, _ := row["RDB$DESCRIPTION"].(string)
+			if desc == "" {
+				desc = "-"
+			}
+			uniqueStr := "NO"
+			if uniqueFlag == 1 {
+				uniqueStr = "YES"
+			}
+			sb.WriteString(fmt.Sprintf("%s | %s | %s | %s\n", name, table, uniqueStr, desc))
+		}
+
+	case "SEQUENCES":
+		result, err := client.Query(ctx, `SELECT
+			RDB$GENERATOR_NAME,
+			RDB$DESCRIPTION
+		FROM RDB$GENERATORS
+		WHERE RDB$SYSTEM_FLAG = 0
+		ORDER BY RDB$GENERATOR_NAME`)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to list sequences: %v", err)), nil
+		}
+
+		count := len(result.Rows)
+		sb.WriteString("### Sequences\n\n")
+		if count == 0 {
+			sb.WriteString("No sequences found.\n")
+			return mcp.NewToolResultText(sb.String()), nil
+		}
+
+		sb.WriteString(fmt.Sprintf("Count: %d sequences\n\n", count))
+		sb.WriteString("NAME | DESCRIPTION\n")
+		sb.WriteString("--- | ---\n")
+
+		for _, row := range result.Rows {
+			name, _ := row["RDB$GENERATOR_NAME"].(string)
+			desc, _ := row["RDB$DESCRIPTION"].(string)
+			if desc == "" {
+				desc = "-"
+			}
+			sb.WriteString(fmt.Sprintf("%s | %s\n", name, desc))
+		}
+	}
 
 	return mcp.NewToolResultText(sb.String()), nil
 }

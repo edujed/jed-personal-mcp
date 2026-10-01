@@ -166,15 +166,26 @@ func (s *ServerConfig) ExecuteWithISQL(ctx context.Context, dbPath, sql string) 
 		return "", err
 	}
 
-	// Build isql command
-	cmd := exec.CommandContext(ctx, isqlPath,
-		"-user", s.User,
-		"-password", s.Password,
-		"-database", s.DSN(dbPath),
-	)
+	// Build DSN: host/port:path (isql format)
+	dsn := fmt.Sprintf("%s/%d:%s", s.Host, s.Port, dbPath)
 
-	// Pass SQL via stdin
-	cmd.Stdin = strings.NewReader(sql)
+	// Create temp file for the script
+	tmpFile, err := os.CreateTemp("", "isql-*.sql")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	// Write script with CONNECT and QUIT
+	script := fmt.Sprintf("CONNECT %s USER %s PASSWORD %s;\n%s\nquit;\n", dsn, s.User, s.Password, sql)
+	if _, err := tmpFile.WriteString(script); err != nil {
+		tmpFile.Close()
+		return "", fmt.Errorf("failed to write temp file: %w", err)
+	}
+	tmpFile.Close()
+
+	// Build isql command with input file
+	cmd := exec.CommandContext(ctx, isqlPath, "-i", tmpFile.Name())
 
 	// Capture output
 	var stdout, stderr strings.Builder
@@ -183,6 +194,37 @@ func (s *ServerConfig) ExecuteWithISQL(ctx context.Context, dbPath, sql string) 
 
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("isql execution failed: %w\nstderr: %s", err, stderr.String())
+	}
+
+	return stdout.String(), nil
+}
+
+// ExecuteMetadataExtract extracts database metadata using isql -x.
+func (s *ServerConfig) ExecuteMetadataExtract(ctx context.Context, dbPath string) (string, error) {
+	// Find isql
+	isqlPath, err := s.FindISQL()
+	if err != nil {
+		return "", err
+	}
+
+	// Build DSN: host/port:path (isql format)
+	dsn := fmt.Sprintf("%s/%d:%s", s.Host, s.Port, dbPath)
+
+	// Build isql command with -x flag for metadata extraction
+	cmd := exec.CommandContext(ctx, isqlPath,
+		"-x",
+		"-u", s.User,
+		"-p", s.Password,
+		dsn,
+	)
+
+	// Capture output
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("isql metadata extraction failed: %w\nstderr: %s", err, stderr.String())
 	}
 
 	return stdout.String(), nil

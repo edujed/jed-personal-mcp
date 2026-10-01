@@ -485,20 +485,26 @@ type ColumnInfo struct {
 	Nullable  any    `json:"nullable"`
 	Default   any    `json:"default"`
 	Position  any    `json:"position"`
+	Domain    string `json:"domain,omitempty"`
 }
 
 // firebirdTypeNames maps RDB$FIELD_TYPE numbers to Firebird type names.
 // These are the standard Firebird type numbers (verified against RDB$FIELDS in Firebird 5).
 // Note: Type numbers may vary between Firebird versions or character sets.
+//
+// Special cases:
+// - Type 8 (INTEGER) can also be NUMERIC when precision/scale are set
+// - Type 12 is DATE (not CHAR as in older Firebird versions)
+// - Type 16 is NUMERIC (not INT64) when precision/scale are set
 var firebirdTypeNames = map[int64]string{
 	7:   "SMALLINT",
 	8:   "INTEGER",
 	9:   "DATE",
 	10:  "TIME",
 	11:  "FLOAT",
-	12:  "CHAR",
+	12:  "DATE",
 	14:  "CHAR",
-	16:  "INT64",
+	16:  "NUMERIC",
 	20:  "VARCHAR",
 	23:  "BOOLEAN",
 	27:  "FLOAT",
@@ -513,9 +519,16 @@ var firebirdTypeNames = map[int64]string{
 	261: "BLOB",
 }
 
-// FormatColumnType returns a human-readable type description for a column.
-func FormatColumnType(col ColumnInfo) string {
-	typeNum := ToInt64(col.TypeNum)
+// FormatColumnTypeWithMeta returns a human-readable type description for a column,
+// taking into account type number, size (in bytes), precision, and scale.
+//
+// For types with character sets (CHAR, VARCHAR, NVARCHAR), the size is converted
+// from bytes to characters (UTF8 = 4 bytes/char, UTF16 = 2 bytes/char, etc.).
+//
+// For NUMERIC/DECIMAL types, precision and scale are included.
+//
+// For types without size (BOOLEAN, TIMESTAMP, DATE, TIME, etc.), no size is shown.
+func FormatColumnTypeWithMeta(typeNum, size, precision, scale int64) string {
 	if typeNum == 0 {
 		return "UNKNOWN"
 	}
@@ -524,19 +537,77 @@ func FormatColumnType(col ColumnInfo) string {
 		return fmt.Sprintf("TYPE_%d", typeNum)
 	}
 
+	// Special case: type 8 can be INTEGER or NUMERIC depending on precision/scale
+	if typeNum == 8 {
+		if precision > 0 {
+			typeName = "NUMERIC"
+		}
+	}
+
+	// Special case: type 16 can be NUMERIC or INT64 depending on precision/scale
+	if typeNum == 16 {
+		if precision == 0 {
+			typeName = "INT64"
+		}
+	}
+
 	// Add size/precision info where relevant
 	switch typeName {
 	case "CHAR", "VARCHAR", "NVARCHAR":
-		if size := ToInt64(col.Size); size > 0 {
-			return fmt.Sprintf("%s(%d)", typeName, size)
+		// Convert bytes to characters for character types
+		charSize := bytesToChars(size, typeName)
+		if charSize > 0 {
+			return fmt.Sprintf("%s(%d)", typeName, charSize)
 		}
 	case "DECIMAL", "NUMERIC":
-		if prec := ToInt64(col.Precision); prec > 0 {
-			if scale := ToInt64(col.Scale); scale > 0 {
-				return fmt.Sprintf("%s(%d,%d)", typeName, prec, scale)
+		if precision > 0 {
+			if scale > 0 {
+				return fmt.Sprintf("%s(%d,%d)", typeName, precision, scale)
 			}
-			return fmt.Sprintf("%s(%d)", typeName, prec)
+			return fmt.Sprintf("%s(%d)", typeName, precision)
 		}
+	}
+	return typeName
+}
+
+// bytesToChars converts a byte size to character count for a given character type.
+// UTF8: 4 bytes/char, UTF16: 2 bytes/char, ASCII/Latin1: 1 byte/char
+func bytesToChars(byteSize int64, typeName string) int64 {
+	if byteSize <= 0 {
+		return 0
+	}
+	// Default to 4 bytes/char (UTF8) for character types
+	// This is a simplification - in reality, the charset should be checked
+	// but for most Firebird databases using UTF8, this is correct
+	switch typeName {
+	case "NVARCHAR":
+		// NVARCHAR is always 2 bytes/char
+		return byteSize / 2
+	default:
+		// CHAR, VARCHAR: assume UTF8 (4 bytes/char)
+		return byteSize / 4
+	}
+}
+
+// FormatColumnType returns a human-readable type description for a column.
+// Deprecated: Use FormatColumnTypeWithMeta instead for more accurate type formatting.
+func FormatColumnType(col ColumnInfo) string {
+	return FormatColumnTypeWithMeta(
+		ToInt64(col.TypeNum),
+		ToInt64(col.Size),
+		ToInt64(col.Precision),
+		ToInt64(col.Scale),
+	)
+}
+
+// FormatColumnTypeNumber returns the type name for a given Firebird type number.
+func FormatColumnTypeNumber(typeNum int64) string {
+	if typeNum == 0 {
+		return "UNKNOWN"
+	}
+	typeName, ok := firebirdTypeNames[typeNum]
+	if !ok {
+		return fmt.Sprintf("TYPE_%d", typeNum)
 	}
 	return typeName
 }
@@ -617,7 +688,8 @@ func (c *Client) DescribeTable(ctx context.Context, tableName string) (*TableSch
 				T.RDB$FIELD_SCALE       AS SCALE,
 				F.RDB$NULL_FLAG         AS NULL_FLAG,
 				F.RDB$DEFAULT_VALUE     AS DEFVAL,
-				F.RDB$FIELD_POSITION    AS POS
+				F.RDB$FIELD_POSITION    AS POS,
+				F.RDB$FIELD_SOURCE      AS DOMAIN
 			FROM RDB$RELATION_FIELDS F
 			LEFT JOIN RDB$FIELDS T
 				ON T.RDB$FIELD_NAME = F.RDB$FIELD_SOURCE
@@ -629,6 +701,11 @@ func (c *Client) DescribeTable(ctx context.Context, tableName string) (*TableSch
 		return nil, fmt.Errorf("failed to get columns: %w", err)
 	}
 	for _, row := range colsResult.Rows {
+		domain := getString(row, "DOMAIN")
+		// Only show domain if it's not a system field (RDB$...)
+		if strings.HasPrefix(domain, "RDB$") {
+			domain = ""
+		}
 		schema.Columns = append(schema.Columns, ColumnInfo{
 			Name:      getString(row, "NAME"),
 			TypeNum:   row["TYPE_NUM"],
@@ -638,6 +715,7 @@ func (c *Client) DescribeTable(ctx context.Context, tableName string) (*TableSch
 			Nullable:  row["NULL_FLAG"],
 			Default:   row["DEFVAL"],
 			Position:  row["POS"],
+			Domain:    domain,
 		})
 	}
 
@@ -763,10 +841,13 @@ func (c *Client) GetForeignKeys(ctx context.Context) ([]ForeignKeyInfo, error) {
 		SELECT
 			c.RDB$CONSTRAINT_NAME AS CONSTRAINT_NAME,
 			c.RDB$RELATION_NAME AS TABLE_NAME,
-			pk.RDB$FIELD_NAME AS FK_COLUMN
+			pk.RDB$FIELD_NAME AS FK_COLUMN,
+			ci.RDB$FOREIGN_KEY AS REF_INDEX,
+			fc.RDB$RELATION_NAME AS REF_TABLE
 		FROM RDB$RELATION_CONSTRAINTS c
 		JOIN RDB$INDICES ci ON ci.RDB$INDEX_NAME = c.RDB$INDEX_NAME
 		JOIN RDB$INDEX_SEGMENTS pk ON pk.RDB$INDEX_NAME = ci.RDB$INDEX_NAME
+		LEFT JOIN RDB$RELATION_CONSTRAINTS fc ON fc.RDB$INDEX_NAME = ci.RDB$FOREIGN_KEY
 		WHERE c.RDB$CONSTRAINT_TYPE = 'FOREIGN KEY'
 		ORDER BY c.RDB$RELATION_NAME, c.RDB$CONSTRAINT_NAME
 	`
@@ -776,52 +857,13 @@ func (c *Client) GetForeignKeys(ctx context.Context) ([]ForeignKeyInfo, error) {
 		return nil, fmt.Errorf("failed to get foreign keys: %w", err)
 	}
 
-	// Get all tables to infer reference tables
-	tablesResult, err := c.Query(ctx, "SELECT RDB$RELATION_NAME FROM RDB$RELATIONS WHERE RDB$SYSTEM_FLAG = 0")
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tables: %w", err)
-	}
-	tableNames := make(map[string]bool)
-	for _, row := range tablesResult.Rows {
-		tableNames[getString(row, "RDB$RELATION_NAME")] = true
-	}
-
 	var fks []ForeignKeyInfo
 	for _, row := range result.Rows {
-		fkColumn := getString(row, "FK_COLUMN")
-		tableName := getString(row, "TABLE_NAME")
-		constraintName := getString(row, "CONSTRAINT_NAME")
-
-		// Infer reference table from FK column name (e.g., PERFIL_ID -> PERFIL)
-		refTable := ""
-		if strings.HasSuffix(fkColumn, "_ID") {
-			baseName := strings.TrimSuffix(fkColumn, "_ID")
-			if tableNames[baseName] {
-				refTable = baseName
-			}
-		}
-
-		// If we couldn't infer from column name, try from constraint name
-		if refTable == "" {
-			// Constraint names often follow pattern: FK_[TABLE]_[COLUMN]
-			parts := strings.Split(constraintName, "_")
-			if len(parts) >= 3 {
-				// Try to find a table that matches part of the constraint name
-				for i := 2; i < len(parts); i++ {
-					candidate := strings.Join(parts[2:i+1], "_")
-					if tableNames[candidate] {
-						refTable = candidate
-						break
-					}
-				}
-			}
-		}
-
 		fks = append(fks, ForeignKeyInfo{
-			ConstraintName: constraintName,
-			Table:          tableName,
-			Column:         fkColumn,
-			RefTable:       refTable,
+			ConstraintName: getString(row, "CONSTRAINT_NAME"),
+			Table:          getString(row, "TABLE_NAME"),
+			Column:         getString(row, "FK_COLUMN"),
+			RefTable:       getString(row, "REF_TABLE"),
 			RefColumn:      "ID", // Assume PK is ID
 		})
 	}
