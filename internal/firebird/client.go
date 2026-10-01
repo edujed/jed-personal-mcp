@@ -479,6 +479,7 @@ func (c *Client) ListTables(ctx context.Context) ([]TableInfo, error) {
 type ColumnInfo struct {
 	Name      string `json:"name"`
 	TypeNum   any    `json:"type_num"`
+	SubType   any    `json:"sub_type"`
 	Size      any    `json:"size"`
 	Precision any    `json:"precision"`
 	Scale     any    `json:"scale"`
@@ -520,15 +521,15 @@ var firebirdTypeNames = map[int64]string{
 }
 
 // FormatColumnTypeWithMeta returns a human-readable type description for a column,
-// taking into account type number, size (in bytes), precision, and scale.
+// taking into account type number, sub-type, size (in bytes), precision, and scale.
 //
 // For types with character sets (CHAR, VARCHAR, NVARCHAR), the size is converted
 // from bytes to characters (UTF8 = 4 bytes/char, UTF16 = 2 bytes/char, etc.).
 //
-// For NUMERIC/DECIMAL types, precision and scale are included.
+// For NUMERIC/DECIMAL types (identified by RDB$FIELD_SUB_TYPE), precision and scale are included.
 //
 // For types without size (BOOLEAN, TIMESTAMP, DATE, TIME, etc.), no size is shown.
-func FormatColumnTypeWithMeta(typeNum, size, precision, scale int64) string {
+func FormatColumnTypeWithMeta(typeNum, subType, size, precision, scale int64) string {
 	if typeNum == 0 {
 		return "UNKNOWN"
 	}
@@ -537,17 +538,28 @@ func FormatColumnTypeWithMeta(typeNum, size, precision, scale int64) string {
 		return fmt.Sprintf("TYPE_%d", typeNum)
 	}
 
-	// Special case: type 8 can be INTEGER or NUMERIC depending on precision/scale
-	if typeNum == 8 {
-		if precision > 0 {
+	// Check if this is a NUMERIC or DECIMAL type using RDB$FIELD_SUB_TYPE.
+	// Sub-type 1 = NUMERIC, Sub-type 2 = DECIMAL.
+	// NOTE: RDB$FIELD_SUB_TYPE is overloaded — for BLOB types (261) it means
+	// blob sub-type (1=TEXT, 2=BINARY, 3=GRAPHIC), so only apply this check
+	// to integer base types (7=SMALLINT, 8=INTEGER, 16=BIGINT, 26=INT128).
+	if (typeNum == 7 || typeNum == 8 || typeNum == 16 || typeNum == 26) && (subType == 1 || subType == 2) {
+		if subType == 1 {
 			typeName = "NUMERIC"
+		} else {
+			typeName = "DECIMAL"
 		}
-	}
-
-	// Special case: type 16 can be NUMERIC or INT64 depending on precision/scale
-	if typeNum == 16 {
-		if precision == 0 {
-			typeName = "INT64"
+		if precision > 0 {
+			// Scale can be negative in Firebird (e.g., -2 for NUMERIC(14,2))
+			// We need to show the absolute value
+			scaleAbs := scale
+			if scaleAbs < 0 {
+				scaleAbs = -scaleAbs
+			}
+			if scaleAbs > 0 {
+				return fmt.Sprintf("%s(%d,%d)", typeName, precision, scaleAbs)
+			}
+			return fmt.Sprintf("%s(%d)", typeName, precision)
 		}
 	}
 
@@ -558,13 +570,6 @@ func FormatColumnTypeWithMeta(typeNum, size, precision, scale int64) string {
 		charSize := bytesToChars(size, typeName)
 		if charSize > 0 {
 			return fmt.Sprintf("%s(%d)", typeName, charSize)
-		}
-	case "DECIMAL", "NUMERIC":
-		if precision > 0 {
-			if scale > 0 {
-				return fmt.Sprintf("%s(%d,%d)", typeName, precision, scale)
-			}
-			return fmt.Sprintf("%s(%d)", typeName, precision)
 		}
 	}
 	return typeName
@@ -594,6 +599,7 @@ func bytesToChars(byteSize int64, typeName string) int64 {
 func FormatColumnType(col ColumnInfo) string {
 	return FormatColumnTypeWithMeta(
 		ToInt64(col.TypeNum),
+		ToInt64(col.SubType),
 		ToInt64(col.Size),
 		ToInt64(col.Precision),
 		ToInt64(col.Scale),
@@ -683,6 +689,7 @@ func (c *Client) DescribeTable(ctx context.Context, tableName string) (*TableSch
 			SELECT
 				F.RDB$FIELD_NAME        AS NAME,
 				T.RDB$FIELD_TYPE        AS TYPE_NUM,
+				T.RDB$FIELD_SUB_TYPE    AS SUB_TYPE,
 				T.RDB$FIELD_LENGTH      AS SIZE,
 				T.RDB$FIELD_PRECISION   AS PREC,
 				T.RDB$FIELD_SCALE       AS SCALE,
@@ -709,6 +716,7 @@ func (c *Client) DescribeTable(ctx context.Context, tableName string) (*TableSch
 		schema.Columns = append(schema.Columns, ColumnInfo{
 			Name:      getString(row, "NAME"),
 			TypeNum:   row["TYPE_NUM"],
+			SubType:   row["SUB_TYPE"],
 			Size:      row["SIZE"],
 			Precision: row["PREC"],
 			Scale:     row["SCALE"],

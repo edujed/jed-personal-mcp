@@ -19,20 +19,21 @@ Is suitable for use with the [Zed Editor](https://zed.dev) in development tasks.
 - **`firebird_insert_batch`** — Insert multiple rows in a single transaction (prepared statement)
 
 ### Schema & Structure
-- **`firebird_show_tables`** — List all tables and views in the database
 - **`firebird_describe_table`** — Show the full schema of a table or view (columns, indexes, constraints, triggers, comments)
 - **`firebird_describe_database`** — Complete database overview with tables, columns, and Mermaid ER diagram
 - **`firebird_get_databases`** — List all configured databases
-- **`firebird_list_procedures`** — List all stored procedures
-- **`firebird_list_functions`** — List all user-defined functions
-- **`firebird_list_domains`** — List all domains (named data types)
 
 ### DDL & Advanced
 - **`firebird_create_database`** — Create a new Firebird database file (restricted to allowed paths)
 - **`firebird_run_script`** — Execute multiple SQL statements in a single transaction
 - **`firebird_create_trigger`** — Create a new trigger (uses isql for SET TERM support)
 - **`firebird_execute_immediate`** — Execute statements with SET TERM blocks (procedures, generators, functions) (uses isql)
+- **`firebird_alter_column_type`** — Change a column's data type to use a domain
+- **`firebird_drop`** — Drop a database object (table, view, domain, trigger, procedure, function, index, sequence)
 - **`firebird_metadata_extract`** — Extract complete database metadata (DDL script) using isql -x
+
+### Discovery
+- **`firebird_list`** — List database objects by type (TABLES, PROCEDURES, FUNCTIONS, DOMAINS, TRIGGERS, INDEXES, SEQUENCES)
 
 ## Prerequisites
 
@@ -176,15 +177,16 @@ ID | NAME | CITY
 3 | Charlie | Rio de Janeiro
 ```
 
-### `firebird_show_tables`
+### `firebird_list`
 
-Lists all user tables and views.
+Lists database objects by type. Supported types: `TABLES`, `PROCEDURES`, `FUNCTIONS`, `DOMAINS`, `TRIGGERS`, `INDEXES`, `SEQUENCES`.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
+| `type` | `string` | Yes | Object type to list |
 | `database` | `string` | No | Database name (defaults to `default_database`) |
 
-**Example output:**
+**Example output (type=TABLES):**
 
 ```markdown
 ### Tables and Views (5)
@@ -197,6 +199,27 @@ PRODUCTS | TABLE | Product catalog
 ORDERS_VIEW | VIEW | Orders with client info
 STATS | TABLE | -
 ```
+
+**Example output (type=DOMAINS):**
+
+```markdown
+### Domains (Named Data Types)
+
+Count: 30 domains
+
+NAME | TYPE | DEFAULT | NULL
+--- | --- | --- | ---
+D_BLOB_TEXT | BLOB | - | YES
+D_BOOLEAN | BOOLEAN | - | YES
+D_DATE | DATE | - | YES
+D_INTEGER | INTEGER | - | YES
+D_MONEY | NUMERIC(14,2) | - | YES
+D_PERCENT | NUMERIC(5,2) | - | YES
+D_REQUIRED_VARCHAR_100 | VARCHAR(100) | - | NO
+D_TIMESTAMP | TIMESTAMP | - | YES
+```
+
+> **Note:** The TYPE column shows the full type with size/precision (e.g., `VARCHAR(100)`, `NUMERIC(14,2)`, `DATE`, `TIMESTAMP`). Character sizes are converted from bytes to characters (UTF8 = 4 bytes/char).
 
 ### `firebird_describe_table`
 
@@ -214,12 +237,12 @@ Shows the full schema of a table or view, including columns (with type, size, nu
 
 #### Columns
 
-NAME | TYPE | NULL | DEFAULT | POSITION
---- | --- | --- | --- | ---
-ID | INTEGER | NO | - | 1
-NAME | VARCHAR(100) | NO | - | 2
-EMAIL | VARCHAR(255) | YES | - | 3
-CREATED_AT | TIMESTAMP | NO | CURRENT_TIMESTAMP | 4
+NAME | TYPE | DOMAIN | NULL | DEFAULT | POSITION
+--- | --- | --- | --- | --- | ---
+ID | INTEGER | - | NO | - | 1
+NAME | VARCHAR(100) | D_REQUIRED_VARCHAR_100 | NO | - | 2
+EMAIL | VARCHAR(255) | - | YES | - | 3
+CREATED_AT | TIMESTAMP | D_TIMESTAMP | NO | CURRENT_TIMESTAMP | 4
 
 #### Indexes
 
@@ -437,72 +460,34 @@ SET TERM ; ^
 Statement executed successfully.
 ```
 
-### `firebird_list_procedures`
+### `firebird_alter_column_type`
 
-Lists all stored procedures in the database.
+Changes the data type of a column to use a domain.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
+| `table` | `string` | Yes | The table name |
+| `column` | `string` | Yes | The column name |
+| `domain` | `string` | Yes | The domain name to apply |
+| `database` | `string` | No | Database name (defaults to `default_database`) |
+
+> **Note:** If the column is part of a Primary Key, Foreign Key, or has a UNIQUE constraint, Firebird will block the alteration. You must drop the constraint first, alter the column, then recreate the constraint.
+
+### `firebird_drop`
+
+Drops a database object by type and name.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `type` | `string` | Yes | Object type: `TABLE`, `VIEW`, `DOMAIN`, `TRIGGER`, `PROCEDURE`, `FUNCTION`, `INDEX`, `SEQUENCE` |
+| `name` | `string` | Yes | The name of the object to drop |
 | `database` | `string` | No | Database name (defaults to `default_database`) |
 
 **Example output:**
 
-```markdown
-### Stored Procedures
-
-Count: 3 procedures
-
-NAME | PARAMETERS | RETURNS | DESCRIPTION
---- | --- | --- | ---
-SP_EXAMPLE | 1 | 2 | Example procedure
-SP_CALCULATE | 2 | 1 | Calculates a value
-SP_LISTAR_CHEFES | 1 | 5 | Lists the chain of managers for a user
 ```
-
-### `firebird_list_functions`
-
-Lists all user-defined functions in the database.
-
-| Argument | Type | Required | Description |
-|---|---|---|---|
-| `database` | `string` | No | Database name (defaults to `default_database`) |
-
-**Example output:**
-
-```markdown
-### User-Defined Functions
-
-Count: 2 functions
-
-NAME | PARAMETERS | RETURN TYPE | DESCRIPTION
---- | --- | --- | ---
-FN_CALCULATE | 2 | INTEGER | Calculates a value
-FN_FORMAT | 1 | VARCHAR | Formats a string
+Successfully dropped TABLE CLIENTS.
 ```
-
-### `firebird_list` (type=DOMAINS)
-
-Lists all domains (named data types) in the database. Domains are reusable data type definitions that can be applied to multiple columns.
-
-| Argument | Type | Required | Description |
-|---|---|---|---|
-| `type` | `string` | Yes | Must be `DOMAINS` |
-| `database` | `string` | No | Database name (defaults to `default_database`) |
-
-**Example output:**
-
-```markdown
-### Domains (Named Data Types)
-
-Count: 2 domains
-
-NAME | TYPE | DEFAULT | NULL
---- | --- | --- | ---
-DOM_EMAIL | VARCHAR(255) | - | YES
-DOM_MONEY | NUMERIC(18,2) | - | YES
-```
-
-> **Note:** The TYPE column now shows the full type with size/precision (e.g., `VARCHAR(100)`, `NUMERIC(14,2)`, `DATE`, `TIMESTAMP`). Character sizes are converted from bytes to characters (UTF8 = 4 bytes/char).
 
 ### `firebird_metadata_extract`
 

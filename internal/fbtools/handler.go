@@ -1507,6 +1507,7 @@ func (h *Handler) HandleList(ctx context.Context, request mcp.CallToolRequest) (
 		result, err := client.Query(ctx, `SELECT
 			RDB$FIELD_NAME,
 			RDB$FIELD_TYPE,
+			RDB$FIELD_SUB_TYPE,
 			RDB$FIELD_LENGTH,
 			RDB$FIELD_PRECISION,
 			RDB$FIELD_SCALE,
@@ -1537,20 +1538,19 @@ func (h *Handler) HandleList(ctx context.Context, request mcp.CallToolRequest) (
 		for _, row := range result.Rows {
 			name, _ := row["RDB$FIELD_NAME"].(string)
 			fieldType := firebird.ToInt64(row["RDB$FIELD_TYPE"])
+			subType := firebird.ToInt64(row["RDB$FIELD_SUB_TYPE"])
 			length := firebird.ToInt64(row["RDB$FIELD_LENGTH"])
 			precision := firebird.ToInt64(row["RDB$FIELD_PRECISION"])
 			scale := firebird.ToInt64(row["RDB$FIELD_SCALE"])
 			defaultSource, _ := row["RDB$DEFAULT_SOURCE"].(string)
 			nullFlag := firebird.ToInt64(row["RDB$NULL_FLAG"])
-			desc, _ := row["RDB$DESCRIPTION"].(string)
 
 			// Use FormatColumnTypeWithMeta for accurate type formatting
 			// This handles:
-			// - Type 8: INTEGER vs NUMERIC (based on precision)
+			// - NUMERIC/DECIMAL types (using RDB$FIELD_SUB_TYPE)
 			// - Type 12: DATE (not CHAR)
-			// - Type 16: NUMERIC vs INT64 (based on precision)
 			// - Character types: bytes → characters conversion
-			typeName := firebird.FormatColumnTypeWithMeta(fieldType, length, precision, scale)
+			typeName := firebird.FormatColumnTypeWithMeta(fieldType, subType, length, precision, scale)
 			defStr := "-"
 			if defaultSource != "" {
 				defStr = defaultSource
@@ -1558,9 +1558,6 @@ func (h *Handler) HandleList(ctx context.Context, request mcp.CallToolRequest) (
 			nullStr := "YES"
 			if nullFlag == 1 {
 				nullStr = "NO"
-			}
-			if desc == "" {
-				desc = "-"
 			}
 			sb.WriteString(fmt.Sprintf("%s | %s | %s | %s\n", name, typeName, defStr, nullStr))
 		}

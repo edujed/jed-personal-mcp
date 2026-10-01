@@ -22,15 +22,15 @@ func TestFormatSchema(t *testing.T) {
 			},
 			{
 				Name:     "NAME",
-				TypeNum:  20, // VARCHAR
-				Size:     100,
+				TypeNum:  20,  // VARCHAR
+				Size:     400, // 100 chars * 4 bytes/char (UTF8)
 				Nullable: 1,
 				Default:  nil,
 				Position: 2,
 			},
 			{
 				Name:     "CREATED_AT",
-				TypeNum:  23, // TIMESTAMP
+				TypeNum:  29, // TIMESTAMP
 				Size:     0,
 				Nullable: 0,
 				Default:  "CURRENT_TIMESTAMP",
@@ -67,13 +67,13 @@ func TestFormatSchema(t *testing.T) {
 	if !strings.Contains(result, "### Table: TEST_TABLE") {
 		t.Error("Missing table header")
 	}
-	if !strings.Contains(result, "ID | INTEGER | NO | - | 1") {
+	if !strings.Contains(result, "ID | INTEGER | - | NO | - | 1") {
 		t.Error("Missing ID column with correct values")
 	}
-	if !strings.Contains(result, "NAME | VARCHAR(100) | YES | - | 2") {
+	if !strings.Contains(result, "NAME | VARCHAR(100) | - | YES | - | 2") {
 		t.Error("Missing NAME column with correct values")
 	}
-	if !strings.Contains(result, "CREATED_AT | TIMESTAMP | NO | CURRENT_TIMESTAMP | 3") {
+	if !strings.Contains(result, "CREATED_AT | TIMESTAMP | - | NO | CURRENT_TIMESTAMP | 3") {
 		t.Error("Missing CREATED_AT column with default value")
 	}
 	if !strings.Contains(result, "PK_TEST_TABLE | YES | 0 | ID") {
